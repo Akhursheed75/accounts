@@ -1,0 +1,54 @@
+# --------------------------------------------------------------------------
+# Real bank statements never enter version control.
+#
+# samples/ holds actual exports from BAC, LAFISE and BANPRO, with real account
+# numbers and the names of people who paid the business. The parsers are built
+# and tested against them, so the files must exist on a developer's machine —
+# but a git repository is forever, and one accidental "make public" would
+# publish them permanently.
+#
+# tests/test_parsers.py skips rather than fails when they are absent, so a
+# clean checkout still runs the rest of the suite.
+# --------------------------------------------------------------------------
+samples/*.pdf
+samples/*.PDF
+
+# Secrets and per-machine configuration
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+FIRST-LOGIN.txt
+.https-backup-*/
+
+# Uploaded statements and generated files
+backend/storage/
+backend/storage-test/
+backups/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+next-env.d.ts
+*.tsbuildinfo
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*

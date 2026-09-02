@@ -1,0 +1,131 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  # Called by the deploy workflow so nothing ships without passing first.
+  workflow_call:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend tests
+    runs-on: ubuntu-latest
+
+    # The suite runs against a real PostgreSQL on purpose: the partial unique
+    # indexes that make double-matching impossible are a PostgreSQL feature, and
+    # a test that does not exercise them proves nothing.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: reconcilia
+          POSTGRES_PASSWORD: reconcilia
+          POSTGRES_DB: reconcilia_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U reconcilia"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install PDF and OCR tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            poppler-utils tesseract-ocr tesseract-ocr-spa tesseract-ocr-eng
+
+      - name: Install Python dependencies
+        working-directory: backend
+        run: pip install -r requirements.txt
+
+      - name: Check the migrations match the models
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql+psycopg://reconcilia:reconcilia@localhost:5432/reconcilia_test
+          SECRET_KEY: ci-secret-not-used-anywhere-real
+        run: |
+          alembic upgrade head
+          # A model changed without a migration is a deployment that fails at
+          # 3am, so catch it here instead.
+          alembic check
+
+      - name: Run the tests
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql+psycopg://reconcilia:reconcilia@localhost:5432/reconcilia_test
+          SECRET_KEY: ci-secret-not-used-anywhere-real
+          STORAGE_ROOT: ./storage-test
+        run: pytest -q --tb=short -rs
+
+      - name: Note which tests were skipped
+        if: always()
+        run: |
+          echo "### Backend" >> "$GITHUB_STEP_SUMMARY"
+          echo "The parser tests read the real bank statements in \`samples/\`," >> "$GITHUB_STEP_SUMMARY"
+          echo "which are deliberately not in this repository. They skip here and" >> "$GITHUB_STEP_SUMMARY"
+          echo "run on a machine that has the files. Everything else runs in full." >> "$GITHUB_STEP_SUMMARY"
+
+  frontend:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Type check
+        working-directory: frontend
+        run: npx tsc --noEmit
+
+      - name: Lint
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Build
+        working-directory: frontend
+        run: npm run build
+
+  compose:
+    name: Docker configuration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate the Compose file
+        run: |
+          cp .env.example .env
+          sed -i 's/CHANGE_ME[A-Za-z_0-9]*/ci-placeholder/g' .env
+          docker compose config --quiet
+          echo "Compose configuration is valid." >> "$GITHUB_STEP_SUMMARY"
+
+  shell:
+    name: Shell scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: ShellCheck
+        run: |
+          sudo apt-get update && sudo apt-get install -y shellcheck
+          shellcheck -S warning ./*.sh

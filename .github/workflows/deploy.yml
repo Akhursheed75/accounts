@@ -1,0 +1,146 @@
+name: Deploy
+
+# Deliberately manual. This system holds accounting records, so a commit
+# reaching the live server is a decision somebody makes, not a side effect of
+# pushing code. Actions → Deploy → Run workflow.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "deploy" to confirm'
+        required: true
+        default: ""
+      run_seed:
+        description: "Also run the seed (safe to repeat; creates nothing that exists)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: Check the confirmation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse unless confirmed
+        if: ${{ github.event.inputs.confirm != 'deploy' }}
+        run: |
+          echo "::error::Type 'deploy' in the confirmation box to run this."
+          exit 1
+
+  test:
+    name: Tests must pass first
+    needs: guard
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    name: Ship to the server
+    needs: test
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Load the SSH key
+        env:
+          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
+          KNOWN_HOSTS: ${{ secrets.KNOWN_HOSTS }}
+        run: |
+          test -n "$SSH_KEY" || { echo "::error::SSH_PRIVATE_KEY secret is not set."; exit 1; }
+          test -n "$SSH_HOST" || { echo "::error::SSH_HOST secret is not set."; exit 1; }
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          # Pin the host key so a redirected DNS record cannot capture the
+          # deployment. Set the KNOWN_HOSTS secret from `ssh-keyscan your-host`.
+          if [ -n "$KNOWN_HOSTS" ]; then
+            printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          else
+            echo "::warning::KNOWN_HOSTS is not set; falling back to trust-on-first-use."
+            ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          fi
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Copy the code across
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
+          REMOTE_DIR: ${{ secrets.REMOTE_DIR || '/root/reconcilia' }}
+        run: |
+          # --delete keeps the server a mirror of the repository, but .env, the
+          # uploaded statements and the sample PDFs live only on the server and
+          # must survive every deployment.
+          rsync -az --delete \
+            -e "ssh -i ~/.ssh/id_deploy -p $SSH_PORT -o StrictHostKeyChecking=yes" \
+            --exclude '.git' \
+            --exclude '.env' \
+            --exclude 'node_modules' \
+            --exclude '.next' \
+            --exclude '__pycache__' \
+            --exclude 'backend/storage' \
+            --exclude 'samples' \
+            --exclude 'FIRST-LOGIN.txt' \
+            --exclude '.https-backup-*' \
+            --exclude 'backups' \
+            ./ "$SSH_USER@$SSH_HOST:$REMOTE_DIR/"
+
+      - name: Rebuild and restart
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
+          REMOTE_DIR: ${{ secrets.REMOTE_DIR || '/root/reconcilia' }}
+          RUN_SEED: ${{ github.event.inputs.run_seed }}
+        run: |
+          ssh -i ~/.ssh/id_deploy -p "$SSH_PORT" -o StrictHostKeyChecking=yes \
+            "$SSH_USER@$SSH_HOST" bash -se <<EOF
+          set -euo pipefail
+          cd "$REMOTE_DIR"
+          chmod +x ./*.sh
+          docker compose build
+          docker compose up -d
+          if [ "$RUN_SEED" = "true" ]; then
+            docker compose exec -T api python -m app.seed
+          fi
+          EOF
+
+      - name: Confirm the site is answering
+        env:
+          HEALTH_URL: ${{ secrets.HEALTH_URL }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
+          REMOTE_DIR: ${{ secrets.REMOTE_DIR || '/root/reconcilia' }}
+        run: |
+          # Checked from inside the server, so it works whether or not the site
+          # is published on a public address yet.
+          for _ in $(seq 1 20); do
+            if ssh -i ~/.ssh/id_deploy -p "$SSH_PORT" -o StrictHostKeyChecking=yes \
+                 "$SSH_USER@$SSH_HOST" \
+                 "cd $REMOTE_DIR && docker compose exec -T api curl -fsS http://localhost:8000/api/health" \
+                 | grep -q '"status":"ok"'; then
+              echo "API is healthy after deployment." >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            sleep 6
+          done
+          echo "::error::The API did not come back healthy. Check: docker compose logs api"
+          exit 1
+
+      - name: Report
+        if: always()
+        run: |
+          {
+            echo "### Deployment"
+            echo "- Commit: \`${{ github.sha }}\`"
+            echo "- Result: ${{ job.status }}"
+            echo ""
+            echo "Data on the server is untouched by a deployment: the database"
+            echo "lives in a Docker volume, and .env, uploaded statements and"
+            echo "samples/ are excluded from the copy."
+          } >> "$GITHUB_STEP_SUMMARY"

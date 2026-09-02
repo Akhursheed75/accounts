@@ -1,0 +1,94 @@
+name: reconcilia
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-reconcilia}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-reconcilia}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-reconcilia} -d ${POSTGRES_DB:-reconcilia}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    # Not published to the host: only the application containers reach it.
+    expose:
+      - "5432"
+
+  api:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment: &backend_env
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-reconcilia}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-reconcilia}
+      SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY in .env}
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      DEBUG: "false"
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      COOKIE_SAMESITE: ${COOKIE_SAMESITE:-lax}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost}
+      STORAGE_ROOT: /app/storage
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-26214400}
+      OCR_DPI: ${OCR_DPI:-300}
+      OCR_LANGUAGES: ${OCR_LANGUAGES:-spa+eng}
+      DEFAULT_DATE_WINDOW_DAYS: ${DEFAULT_DATE_WINDOW_DAYS:-3}
+      # Read once, by `python -m app.seed`, to create the first administrator.
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@example.com}
+      ADMIN_NAME: ${ADMIN_NAME:-System administrator}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      DEMO_PASSWORD: ${DEMO_PASSWORD:-DemoShop!2026}
+    volumes:
+      - statements:/app/storage
+    expose:
+      - "8000"
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips '*'"
+
+  worker:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_started
+      db:
+        condition: service_healthy
+    environment: *backend_env
+    volumes:
+      - statements:/app/storage
+    # PDF work — OCR above all — is far too slow to run inside a web request.
+    command: ["python", "-m", "app.worker"]
+
+  web:
+    build:
+      context: ./frontend
+    restart: unless-stopped
+    depends_on:
+      - api
+    environment:
+      API_URL: http://api:8000
+    expose:
+      - "3000"
+
+  proxy:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      - web
+      - api
+    ports:
+      - "${HTTP_BIND:-0.0.0.0}:${HTTP_PORT:-80}:80"
+    volumes:
+      - ./nginx/reconcilia.conf:/etc/nginx/conf.d/default.conf:ro
+
+volumes:
+  db-data:
+  statements:

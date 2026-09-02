@@ -1,0 +1,353 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ===========================================================================
+   Themes
+   ---------------------------------------------------------------------------
+   Colours are RGB channels in CSS variables. The light theme's values are the
+   ones this application shipped with; the dark theme inverts each scale so that
+   a class written as "dark text on a pale background" becomes "pale text on a
+   dark background" without the markup changing.
+
+   Dark is the default. Light is opt-in, and remembered per browser.
+   =========================================================================== */
+
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --surface: 17 24 40;          /* card and panel background */
+  --surface-2: 22 31 51;        /* raised surface, hover rows   */
+  --shadow: 2 5 14;
+
+  /* Deepest at 50, brightest at 950 — the inverse of the light scale. */
+  --ink-50: 9 13 25;            /* page background */
+  --ink-100: 23 32 52;          /* hover, subtle fills */
+  --ink-200: 33 45 71;          /* borders */
+  --ink-300: 48 64 96;          /* stronger borders, disabled */
+  --ink-400: 106 122 154;       /* faint text, icons */
+  --ink-500: 141 158 189;       /* secondary text */
+  --ink-600: 168 183 210;
+  --ink-700: 196 208 229;
+  --ink-800: 216 226 242;
+  --ink-900: 233 240 252;       /* primary text */
+  --ink-950: 246 249 255;
+
+  --brand-50: 20 33 60;         /* tinted panel behind brand content */
+  --brand-100: 25 42 76;
+  --brand-200: 32 56 105;
+  --brand-300: 44 79 145;
+  --brand-400: 58 108 196;
+  --brand-500: 61 122 226;
+  --brand-600: 47 106 224;      /* primary button */
+  --brand-700: 63 124 240;      /* …hover: brighter, not darker */
+  --brand-800: 92 148 250;
+  --brand-900: 150 189 255;
+  --brand-950: 205 224 255;
+
+  --emerald-50: 10 40 32;
+  --emerald-100: 14 55 43;
+  --emerald-200: 21 76 60;
+  --emerald-300: 26 110 85;
+  --emerald-500: 52 211 153;    /* status dot — vivid in both themes */
+  --emerald-600: 64 214 160;
+  --emerald-700: 110 231 183;
+  --emerald-800: 167 243 208;
+  --emerald-900: 209 250 229;
+
+  --amber-50: 48 32 8;
+  --amber-100: 66 44 10;
+  --amber-200: 92 62 15;
+  --amber-300: 133 92 24;
+  --amber-500: 245 158 11;
+  --amber-600: 251 178 45;
+  --amber-700: 252 196 87;
+  --amber-800: 253 212 130;
+  --amber-900: 254 231 180;
+
+  --red-50: 55 20 24;
+  --red-100: 74 26 31;
+  --red-200: 102 35 42;
+  --red-300: 146 48 58;
+  --red-500: 239 68 68;
+  --red-600: 246 100 100;
+  --red-700: 250 133 133;
+  --red-800: 252 165 165;
+  --red-900: 254 202 202;
+
+  --violet-50: 38 27 66;
+  --violet-100: 50 35 88;
+  --violet-200: 68 48 120;
+  --violet-300: 95 68 168;
+  --violet-500: 139 92 246;
+  --violet-600: 162 124 250;
+  --violet-700: 183 155 252;
+  --violet-800: 205 185 253;
+  --violet-900: 226 214 254;
+
+  --sky-50: 8 36 55;
+  --sky-100: 11 49 74;
+  --sky-200: 15 68 103;
+  --sky-300: 21 97 147;
+  --sky-500: 14 165 233;
+  --sky-600: 56 189 248;
+  --sky-700: 125 211 252;
+  --sky-800: 186 230 253;
+  --sky-900: 224 242 254;
+
+  --orange-50: 55 28 10;
+  --orange-100: 74 38 13;
+  --orange-200: 103 53 18;
+  --orange-300: 147 76 26;
+  --orange-500: 249 115 22;
+  --orange-600: 251 146 60;
+  --orange-700: 253 186 116;
+  --orange-800: 254 215 170;
+  --orange-900: 255 237 213;
+
+  /* Elements that must stay legible whichever way the scales run. */
+  --on-brand: 255 255 255;
+  --toast-ok-bg: 6 95 70;
+  --toast-ok-ring: 4 120 87;
+  --toast-error-bg: 153 27 27;
+  --toast-error-ring: 185 28 28;
+  --toast-info-bg: 30 41 59;
+  --toast-info-ring: 51 65 85;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --surface: 255 255 255;
+  --surface-2: 249 250 252;
+  --shadow: 31 36 48;
+
+  --ink-50: 246 247 249;
+  --ink-100: 236 238 242;
+  --ink-200: 213 217 226;
+  --ink-300: 176 184 201;
+  --ink-400: 133 146 171;
+  --ink-500: 101 115 145;
+  --ink-600: 80 92 120;
+  --ink-700: 66 75 97;
+  --ink-800: 58 65 82;
+  --ink-900: 31 36 48;
+  --ink-950: 20 23 31;
+
+  --brand-50: 238 246 255;
+  --brand-100: 217 235 255;
+  --brand-200: 188 220 255;
+  --brand-300: 142 198 255;
+  --brand-400: 89 165 255;
+  --brand-500: 51 130 252;
+  --brand-600: 29 99 241;
+  --brand-700: 22 78 222;
+  --brand-800: 24 65 180;
+  --brand-900: 26 58 142;
+  --brand-950: 20 37 86;
+
+  --emerald-50: 236 253 245;
+  --emerald-100: 209 250 229;
+  --emerald-200: 167 243 208;
+  --emerald-300: 110 231 183;
+  --emerald-500: 16 185 129;
+  --emerald-600: 5 150 105;
+  --emerald-700: 4 120 87;
+  --emerald-800: 6 95 70;
+  --emerald-900: 6 78 59;
+
+  --amber-50: 255 251 235;
+  --amber-100: 254 243 199;
+  --amber-200: 253 230 138;
+  --amber-300: 252 211 77;
+  --amber-500: 245 158 11;
+  --amber-600: 217 119 6;
+  --amber-700: 180 83 9;
+  --amber-800: 146 64 14;
+  --amber-900: 120 53 15;
+
+  --red-50: 254 242 242;
+  --red-100: 254 226 226;
+  --red-200: 254 202 202;
+  --red-300: 252 165 165;
+  --red-500: 239 68 68;
+  --red-600: 220 38 38;
+  --red-700: 185 28 28;
+  --red-800: 153 27 27;
+  --red-900: 127 29 29;
+
+  --violet-50: 245 243 255;
+  --violet-100: 237 233 254;
+  --violet-200: 221 214 254;
+  --violet-300: 196 181 253;
+  --violet-500: 139 92 246;
+  --violet-600: 124 58 237;
+  --violet-700: 109 40 217;
+  --violet-800: 91 33 182;
+  --violet-900: 76 29 149;
+
+  --sky-50: 240 249 255;
+  --sky-100: 224 242 254;
+  --sky-200: 186 230 253;
+  --sky-300: 125 211 252;
+  --sky-500: 14 165 233;
+  --sky-600: 2 132 199;
+  --sky-700: 3 105 161;
+  --sky-800: 7 89 133;
+  --sky-900: 12 74 110;
+
+  --orange-50: 255 247 237;
+  --orange-100: 255 237 213;
+  --orange-200: 254 215 170;
+  --orange-300: 253 186 116;
+  --orange-500: 249 115 22;
+  --orange-600: 234 88 12;
+  --orange-700: 194 65 12;
+  --orange-800: 154 52 18;
+  --orange-900: 124 45 18;
+
+  --on-brand: 255 255 255;
+  --toast-ok-bg: 5 150 105;
+  --toast-ok-ring: 4 120 87;
+  --toast-error-bg: 220 38 38;
+  --toast-error-ring: 185 28 28;
+  --toast-info-bg: 31 36 48;
+  --toast-info-ring: 20 23 31;
+}
+
+:root {
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  @apply bg-ink-50 text-ink-900 antialiased;
+}
+
+/* The dark theme reads better with a very slight vertical lift behind the
+   content, the way the panels in a good trading terminal do. */
+:root[data-theme="dark"] body,
+:root:not([data-theme="light"]) body {
+  background-image:
+    radial-gradient(1200px 600px at 15% -10%, rgb(var(--brand-200) / 0.35), transparent 60%),
+    radial-gradient(900px 500px at 100% 0%, rgb(var(--violet-200) / 0.22), transparent 55%);
+  background-attachment: fixed;
+}
+
+::selection {
+  background: rgb(var(--brand-500) / 0.32);
+}
+
+@layer components {
+  .card {
+    @apply rounded-xl border border-ink-200 bg-surface shadow-sm;
+  }
+  .card-pad {
+    @apply p-4 sm:p-5;
+  }
+
+  .label {
+    @apply mb-1 block text-xs font-medium uppercase tracking-wide text-ink-500;
+  }
+
+  .input {
+    @apply w-full rounded-lg border border-ink-300 bg-surface px-3 py-2 text-sm
+           text-ink-900 shadow-sm outline-none transition
+           placeholder:text-ink-400
+           focus:border-brand-500 focus:ring-2 focus:ring-brand-500/25
+           disabled:cursor-not-allowed disabled:bg-ink-100 disabled:text-ink-500;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2
+           text-sm font-medium transition
+           focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40
+           disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply btn bg-brand-600 hover:bg-brand-700 active:bg-brand-800;
+    color: rgb(var(--on-brand));
+  }
+  .btn-secondary {
+    @apply btn border border-ink-300 bg-surface text-ink-800 hover:bg-ink-100;
+  }
+  .btn-ghost {
+    @apply btn text-ink-600 hover:bg-ink-100 hover:text-ink-900;
+  }
+  .btn-danger {
+    @apply btn border border-red-200 bg-red-50 text-red-700 hover:bg-red-100;
+  }
+  .btn-sm {
+    @apply px-2.5 py-1.5 text-xs;
+  }
+
+  .nav-link {
+    @apply flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm text-ink-700
+           transition hover:bg-ink-100 hover:text-ink-900;
+  }
+  .nav-link-active {
+    @apply bg-brand-50 font-medium text-brand-900;
+  }
+
+  .th {
+    @apply whitespace-nowrap px-3 py-2.5 text-left text-xs font-semibold
+           uppercase tracking-wide text-ink-500;
+  }
+  .td {
+    @apply whitespace-nowrap px-3 py-2.5 text-sm text-ink-800;
+  }
+
+  .toast {
+    @apply pointer-events-auto flex w-full max-w-md items-start gap-2 rounded-lg
+           px-3 py-2 text-sm shadow-lg ring-1;
+    color: rgb(var(--on-brand));
+  }
+  .toast-ok {
+    background: rgb(var(--toast-ok-bg));
+    --tw-ring-color: rgb(var(--toast-ok-ring));
+  }
+  .toast-error {
+    background: rgb(var(--toast-error-bg));
+    --tw-ring-color: rgb(var(--toast-error-ring));
+  }
+  .toast-info {
+    background: rgb(var(--toast-info-bg));
+    --tw-ring-color: rgb(var(--toast-info-ring));
+  }
+
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* Tables scroll inside their own container so the page never scrolls sideways. */
+.table-scroll {
+  @apply -mx-4 overflow-x-auto sm:mx-0;
+}
+
+/* Native controls follow the theme rather than staying stubbornly white. */
+input[type="date"]::-webkit-calendar-picker-indicator {
+  filter: var(--picker-filter, none);
+}
+:root[data-theme="dark"] input[type="date"]::-webkit-calendar-picker-indicator,
+:root:not([data-theme="light"]) input[type="date"]::-webkit-calendar-picker-indicator {
+  filter: invert(1) opacity(0.65);
+}
+
+input[type="checkbox"] {
+  accent-color: rgb(var(--brand-600));
+}
+
+/* Keep printed pages readable regardless of the theme on screen. */
+@media print {
+  body {
+    background: #fff !important;
+    color: #000 !important;
+    background-image: none !important;
+  }
+}

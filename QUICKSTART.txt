@@ -1,0 +1,140 @@
+Reconcilia — installation guide
+===============================
+
+Two commands. The first copies the project to your server; the second, run on
+the server, does everything else.
+
+
+STEP 1 — copy the project to the server
+---------------------------------------
+Run this on YOUR OWN computer, in the folder holding reconcilia.tar.gz:
+
+    scp reconcilia.tar.gz root@188.166.237.166:/root/
+
+It will ask for the server's root password.
+
+
+STEP 2 — install, on the server
+-------------------------------
+Log in and run the installer:
+
+    ssh root@188.166.237.166
+
+    tar xzf reconcilia.tar.gz
+    cd reconcilia
+    ./server-setup.sh
+
+That single script does all of it:
+
+  * adds swap if the server has little memory, so the build cannot run out
+  * installs Docker and the Compose plugin if they are missing
+  * generates a .env with fresh random secrets — database password, signing
+    key, and your first administrator password
+  * asks which email address you want to sign in with
+  * builds the images, starts everything, runs the database migrations
+  * creates the reference data and your administrator account
+  * signs in once itself to prove the account works
+  * prints the address, email and password, and saves them to FIRST-LOGIN.txt
+
+The first build takes 5-10 minutes: it compiles the frontend and installs the
+OCR engine. Later runs take seconds.
+
+When it finishes, open   http://188.166.237.166   and sign in.
+
+
+Want to see it working before entering real data?
+-------------------------------------------------
+    ./server-setup.sh --demo
+
+This also loads the eight real statement PDFs in samples/ and four demo shop
+sheets, then reconciles them. You will see eleven payments matched, one payment
+the bank never received, and one that has two equally good candidates and is
+therefore left for a person to decide. Demo rows are labelled as such and can
+be archived once you have looked at them.
+
+
+THE FIRST FIFTEEN MINUTES IN THE APP
+------------------------------------
+1. Change your password.  Bottom-left of the sidebar, next to your name, there
+   is a "Password" button. Changing it signs out every session on every device,
+   including the one you are using, so you will be asked to sign in again.
+   Then delete FIRST-LOGIN.txt from the server.
+
+2. Settings -> Shops & cities.  The three shops are placeholders called
+   "Shop 1", "Shop 2", "Shop 3". Put in the real names and cities.
+
+3. Settings -> Banks & accounts.  Each bank needs one account per currency,
+   with the real account number. BAC, LAFISE and BANPRO already have working
+   statement parsers. FICOHSA does not - see the note at the bottom.
+
+4. Settings -> Users & roles.  Create a shop user for each shop and tick only
+   that shop. They will be able to enter their daily sheet and nothing else -
+   no dashboard, no other shop's figures.
+
+5. Bank statements -> Upload statement.  Try one real PDF. Open it afterwards
+   and check the extracted rows against the paper. This is the step worth being
+   fussy about: if the extraction is right, the reconciliation will be too.
+
+6. Daily accounting -> New sheet.  Enter one real day, including the deposits.
+   Save it, then open Reconciliation.
+
+
+RUNNING IT DAY TO DAY
+---------------------
+Everything below is run from /root/reconcilia on the server.
+
+    docker compose logs -f api worker      watch what is happening
+    docker compose ps                      what is running
+    docker compose restart api             restart just the API
+    ./backup.sh                            dump the database and stored PDFs
+    ./server-setup.sh --update             rebuild after a code change
+    docker compose down                    stop; data is kept in volumes
+
+Take backups somewhere other than this server. ./backup.sh writes both the
+database and the stored statement PDFs; you need both, because the database
+without the PDFs loses the evidence behind every extracted transaction.
+
+
+TWO THINGS TO DO BEFORE THIS HOLDS REAL MONEY
+---------------------------------------------
+1. Change the server's root password. It was pasted into a chat transcript, so
+   treat it as public:
+
+       passwd
+
+2. Put HTTPS in front of the site. Right now it is plain HTTP, which means
+   passwords and session cookies cross the internet in clear text. Once you
+   have a domain pointed at the server, the shortest route is Caddy:
+
+       apt install -y caddy
+       # /etc/caddy/Caddyfile:
+       #   accounting.yourdomain.com {
+       #       reverse_proxy 127.0.0.1:80
+       #   }
+       systemctl restart caddy
+
+   Then edit /root/reconcilia/.env:
+
+       COOKIE_SECURE=true
+       CORS_ORIGINS=https://accounting.yourdomain.com
+
+   and apply it:
+
+       cd /root/reconcilia && docker compose up -d
+
+
+ABOUT FICOHSA
+-------------
+There is no FICOHSA parser, because no FICOHSA statement was ever provided and
+the four banks do not share a format. Uploading a FICOHSA PDF stores the file
+and reports that no parser exists — it does not guess. Send one real FICOHSA
+statement and the parser can be written against it.
+
+
+ABOUT samples/
+--------------
+That directory holds your real bank statements, with real account numbers. They
+are there because the parsers are tested against them, which is how a change in
+a bank's layout shows up as a failing test rather than as a wrong reconciliation.
+Keep this project private. If you ever put it in a public repository, delete
+samples/ first.
