@@ -60,6 +60,10 @@ THE FIRST FIFTEEN MINUTES IN THE APP
    including the one you are using, so you will be asked to sign in again.
    Then delete FIRST-LOGIN.txt from the server.
 
+1b. The system opens in a dark theme. The sun/moon button beside your name at
+   the foot of the sidebar switches to light, and remembers your choice in that
+   browser. It is per-person - switching does not change what anyone else sees.
+
 2. Settings -> Shops & cities.  The three shops are placeholders called
    "Shop 1", "Shop 2", "Shop 3". Put in the real names and cities.
 
@@ -77,6 +81,13 @@ THE FIRST FIFTEEN MINUTES IN THE APP
 
 6. Daily accounting -> New sheet.  Enter one real day, including the deposits.
    Save it, then open Reconciliation.
+
+   Entering deposits is built for speed: press "Add transfer" once, pick the
+   bank and currency, then type an amount and press Enter for each further
+   deposit. Each new row keeps the same bank and currency and puts the cursor
+   in the amount box, so three deposits are typed without touching the mouse.
+   Amounts can be typed exactly as printed on the slip - "C$8,275.00" is
+   understood and tidied for you.
 
 
 RUNNING IT DAY TO DAY
