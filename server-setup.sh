@@ -176,13 +176,21 @@ HTTP_PORT=$(env_get HTTP_PORT)
 HTTP_PORT=${HTTP_PORT:-80}
 CONFIGURED_ORIGIN=$(env_get CORS_ORIGINS)
 
-# When .env was written by an earlier run, its address is the authoritative one.
+# When .env names the address people actually use, that is the authoritative
+# one and it is printed verbatim. HTTP_PORT is where *this* stack listens, which
+# with a TLS terminator in front is an internal detail — appending it produced
+# nonsense like "https://example.com:8080".
 if [[ -n "$CONFIGURED_ORIGIN" ]]; then
   SITE_URL="${CONFIGURED_ORIGIN%%,*}"
 else
   SITE_URL="http://${PUBLIC_IP}"
+  [[ "$HTTP_PORT" != "80" ]] && SITE_URL="${SITE_URL}:${HTTP_PORT}"
 fi
-[[ "$HTTP_PORT" != "80" ]] && SITE_URL="${SITE_URL}:${HTTP_PORT}"
+
+# Loopback-only means something else is serving the public address.
+FRONTED=false
+[[ "$SITE_URL" == https://* ]] && FRONTED=true
+[[ "$(env_get HTTP_BIND)" == "127.0.0.1" ]] && FRONTED=true
 
 if [[ -z "$ADMIN_EMAIL" ]]; then
   die "ADMIN_EMAIL is missing from .env. Add it and re-run."
@@ -297,8 +305,27 @@ ${BOLD}Day to day, from ${PROJECT_DIR}${OFF}
   sudo ./server-setup.sh --update       rebuild after changing the code
   docker compose down                   stop (data is kept)
 
+EOF
+
+if [[ "$FRONTED" == true ]]; then
+  COOKIE_SECURE_NOW="$(env_get COOKIE_SECURE)"
+  if [[ "$SITE_URL" == https://* && "$COOKIE_SECURE_NOW" != "true" ]]; then
+    cat <<EOF
+
+${YELLOW}${BOLD}One setting left${OFF}
+  ${SITE_URL} is HTTPS but COOKIE_SECURE is still false, so session cookies
+  may still be sent over a plain connection. Once you have loaded that address
+  in a browser and it works:
+
+    sed -i 's|^COOKIE_SECURE=.*|COOKIE_SECURE=true|' .env && docker compose up -d
+EOF
+  fi
+else
+  cat <<EOF
+
 ${YELLOW}${BOLD}Before this holds real money${OFF}
   This is plain HTTP. Passwords and session cookies cross the network in clear
   text. Put a domain and a certificate in front of it, then set
   COOKIE_SECURE=true in .env and run: docker compose up -d
 EOF
+fi
