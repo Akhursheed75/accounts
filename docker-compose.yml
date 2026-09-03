@@ -64,6 +64,12 @@ services:
     environment: *backend_env
     volumes:
       - statements:/app/storage
+    # The worker shares the API's image, and so inherits its HEALTHCHECK, which
+    # curls a web server the worker does not run. That made `docker compose ps`
+    # report the worker unhealthy for ever, which is worse than no signal at
+    # all: it trains whoever is on call to ignore the column.
+    healthcheck:
+      disable: true
     # PDF work — OCR above all — is far too slow to run inside a web request.
     command: ["python", "-m", "app.worker"]
 
