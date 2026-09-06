@@ -1,30 +1,51 @@
 Reconcilia — installation guide
 ===============================
 
-Two commands. The first copies the project to your server; the second, run on
-the server, does everything else.
+One command on a fresh server does everything, including the domain and the
+HTTPS certificate.
 
 
-STEP 1 — copy the project to the server
+STEP 1 — point the domain at the server
 ---------------------------------------
-Run this on YOUR OWN computer, in the folder holding reconcilia.tar.gz:
+In your DNS provider, make the A record for the address you want — for example
+account.its-abdullah.dev — point at the server's IP, for example
 
-    scp reconcilia.tar.gz root@188.166.237.166:/root/
+    A    account    178.128.82.112
 
-It will ask for the server's root password.
+Do this first. A certificate cannot be issued for a name that does not yet
+resolve to the server, and a failed request counts against a rate limit.
+
+Check it from your own computer before going on:
+
+    ping account.its-abdullah.dev
+
+It should answer from the server's IP.
 
 
-STEP 2 — install, on the server
--------------------------------
-Log in and run the installer:
+STEP 2 — get the code onto the server
+-------------------------------------
+    ssh root@178.128.82.112
 
-    ssh root@188.166.237.166
+Then, on the server, either clone it (private repository, so it asks for your
+GitHub username and a personal access token as the password):
+
+    apt update && apt install -y git
+    git clone https://github.com/YOUR-USER/YOUR-REPO.git reconcilia
+    cd reconcilia
+
+or, if you copied reconcilia.tar.gz up with scp instead:
 
     tar xzf reconcilia.tar.gz
     cd reconcilia
-    ./server-setup.sh
 
-That single script does all of it:
+
+STEP 3 — install
+----------------
+One command:
+
+    ./server-setup.sh --domain account.its-abdullah.dev
+
+That script does all of it:
 
   * adds swap if the server has little memory, so the build cannot run out
   * installs Docker and the Compose plugin if they are missing
@@ -34,12 +55,36 @@ That single script does all of it:
   * builds the images, starts everything, runs the database migrations
   * creates the reference data and your administrator account
   * signs in once itself to prove the account works
+  * installs nginx and certbot, and puts nginx in front of the application
+  * checks the domain really points here before asking for a certificate
+  * gets a Let's Encrypt certificate and turns on the HTTP-to-HTTPS redirect
+  * confirms the site answers over HTTPS, and only then makes session cookies
+    HTTPS-only
   * prints the address, email and password, and saves them to FIRST-LOGIN.txt
 
 The first build takes 5-10 minutes: it compiles the frontend and installs the
 OCR engine. Later runs take seconds.
 
-When it finishes, open   http://188.166.237.166   and sign in.
+When it finishes, open   https://account.its-abdullah.dev   and sign in.
+
+Renewal is automatic, through the certbot systemd timer. Nothing to do.
+
+Notes
+-----
+  * Add --email you@example.com to give Let's Encrypt a contact address it can
+    actually reach if renewal ever breaks.
+
+  * Without --domain the application is served over plain HTTP on the server's
+    IP. Fine for a look; not for real records.
+
+  * Re-running the same command after a code change is safe:
+
+        ./server-setup.sh --update
+
+    It keeps the database, the .env, the certificate and the nginx site.
+
+  * Nothing else on the machine should be listening on ports 80 or 443. On a
+    fresh droplet nothing is.
 
 
 Want to see it working before entering real data?

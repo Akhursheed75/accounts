@@ -126,6 +126,16 @@ rollback() {
   echo "    The site is back on plain HTTP at http://${SERVER_IP}"
 }
 
+# Something else on this machine holding port 80 means Caddy cannot bind it, and
+# that something is most likely host nginx put there by server-setup.sh --domain,
+# which already does this job.
+if ss -ltn 2>/dev/null | grep -qE '(^|[^0-9.:])(0\.0\.0\.0|\[::\]|\*):80\b' \
+   && ! docker compose ps --services --filter status=running 2>/dev/null | grep -qx proxy; then
+  die "Something on this server is already listening on port 80.
+If that is nginx from './server-setup.sh --domain', HTTPS is already set up and
+you do not need this script. Otherwise stop it first."
+fi
+
 # --- 4. the plain-HTTP port becomes local-only -----------------------------
 step "Moving the plain-HTTP port"
 python3 - <<'PY'

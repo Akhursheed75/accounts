@@ -440,25 +440,39 @@ npm run build
 
 ### The short way — one script, run on the server
 
-```bash
-# on your own computer
-scp reconcilia.tar.gz root@your-server-ip:/root/
+Point an A record at the server first, then:
 
+```bash
 # on the server
-ssh root@your-server-ip
-tar xzf reconcilia.tar.gz && cd reconcilia
-./server-setup.sh
+git clone https://github.com/YOUR-USER/YOUR-REPO.git reconcilia && cd reconcilia
+./server-setup.sh --domain account.example.com
 ```
 
-`server-setup.sh` adds swap if memory is tight (a 1 GB droplet cannot compile
-the frontend without it, and fails with a bare "Killed"), installs Docker if it
-is missing, generates a `.env` with fresh random secrets, builds, starts, runs
-the migrations, seeds the reference data, **signs in once to prove the account
-works**, and prints the address and credentials.
+That is the whole deployment. `server-setup.sh` adds swap if memory is tight (a
+1 GB droplet cannot compile the frontend without it, and fails with a bare
+"Killed"), installs Docker if it is missing, generates a `.env` with fresh
+random secrets, builds, starts, runs the migrations, seeds the reference data,
+**signs in once to prove the account works**, then — when `--domain` is given —
+installs nginx and certbot, writes the vhost, checks the name really resolves
+here, obtains a Let's Encrypt certificate, turns on the HTTP-to-HTTPS redirect,
+verifies the site answers over HTTPS, and only then sets `COOKIE_SECURE=true`.
+Renewal is the certbot systemd timer; nothing to maintain.
+
+Two details that are easy to get wrong and are handled here:
+
+* the vhost sets `client_max_body_size 25m`. nginx defaults to 1 MB, so without
+  it every statement upload fails with a bare `413` and nothing in the
+  application's log.
+* `COOKIE_SECURE=true` is set *after* HTTPS is confirmed working. Setting it
+  while the site is still plain HTTP makes the browser discard the session
+  cookie, and the sign-in page silently loops back to itself.
+
+Without `--domain` the application is served over plain HTTP on the server's IP.
 
 It is safe to run again: it never overwrites an existing `.env` and never
-touches the database volume. `--demo` also loads the sample statements and demo
-sheets; `--update` rebuilds after a code change.
+touches the database volume, and it leaves an existing certificate and vhost
+alone. `--demo` also loads the sample statements and demo sheets; `--update`
+rebuilds after a code change.
 
 ### The alternative — push from your own machine
 
@@ -483,9 +497,12 @@ docker compose restart api
 docker compose down                                 # data survives in named volumes
 ```
 
-### Putting HTTPS in front of it
+### HTTPS without host nginx
 
-One command, once an A record points your domain at the server:
+`server-setup.sh --domain` uses nginx and certbot on the host, which is the
+right answer when the machine may also serve something else one day. If you
+would rather keep everything inside Docker, `enable-https.sh` does the same job
+with Caddy instead:
 
 ```bash
 sudo ./enable-https.sh account.example.com you@example.com
@@ -493,16 +510,15 @@ sudo ./enable-https.sh account.example.com you@example.com
 
 It checks that the domain really resolves to this machine (Let's Encrypt
 rate-limits failures, so guessing is expensive), adds Caddy to the stack to
-obtain and renew the certificate, moves nginx onto `127.0.0.1:8080` so the
-application can no longer be reached unencrypted, sets `COOKIE_SECURE=true` and
-`CORS_ORIGINS`, and then proves it worked by fetching `/api/health` over HTTPS.
+obtain and renew the certificate, moves the application's nginx onto
+`127.0.0.1:8080`, sets `COOKIE_SECURE=true` and `CORS_ORIGINS`, and then proves
+it worked by fetching `/api/health` over HTTPS. If any of that fails it restores
+the previous configuration rather than leaving a half-configured site.
 
-If any of that fails it restores the previous configuration rather than leaving
-a half-configured site. Everything it changed is backed up into a
-`.https-backup-*` directory, and the exact commands to undo it are printed at
-the end.
+**Use one or the other, not both** — they both want port 80. Caddy cannot bind
+it while host nginx is running.
 
-Until this is done, session cookies travel in clear text over the network.
+Until one of them is done, session cookies travel in clear text.
 
 ---
 

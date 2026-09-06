@@ -2,7 +2,7 @@
 # ---------------------------------------------------------------------------
 # Copies this project to a server and starts it with Docker Compose.
 #
-#   ./deploy.sh root@188.166.237.166
+#   ./deploy.sh root@178.128.82.112
 #
 # Run it from your own computer, not from the server. It needs ssh and rsync
 # locally, and Docker with the compose plugin on the server; if Docker is
