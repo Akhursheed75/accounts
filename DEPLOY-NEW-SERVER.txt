@@ -1,0 +1,117 @@
+Reconcilia — putting it on the new server
+=========================================
+
+Server   178.128.82.112
+Domain   account.its-abdullah.dev
+
+
+PART 1 — push this to GitHub, from your laptop
+----------------------------------------------
+This folder is already a git repository with the full history, so you only
+need to point it at your repository and push.
+
+    cd /home/abdullah/new-repo/reconcilia
+
+    git remote add origin https://github.com/YOUR-USER/YOUR-REPO.git
+    git branch -M main
+    git push -u origin main
+
+If it asks for a password, that is a GitHub personal access token, not your
+account password. Make one at github.com/settings/tokens with the "repo"
+scope.
+
+Keep the repository PRIVATE. Two reasons:
+  * docs/Reconcilia-User-Manual.pdf has screenshots with real customer names
+    and real transaction descriptions in them.
+  * samples/ holds real bank statements. Those are excluded by .gitignore and
+    will not be pushed, but they are in this folder on your laptop.
+
+
+PART 2 — point the domain at the new server
+--------------------------------------------
+In your DNS provider, change the A record:
+
+    A    account    178.128.82.112
+
+Then, from your laptop, check it before going any further:
+
+    ping account.its-abdullah.dev
+
+It must answer from 178.128.82.112. A certificate cannot be issued for a name
+that still points at the old, destroyed server, and failed requests count
+against a rate limit.
+
+
+PART 3 — deploy, one command
+-----------------------------
+    ssh root@178.128.82.112
+
+Then on the server, one line at a time:
+
+    apt update && apt install -y git
+
+    git clone https://github.com/YOUR-USER/YOUR-REPO.git reconcilia
+
+    cd reconcilia
+
+    ./server-setup.sh --domain account.its-abdullah.dev
+
+That is everything. It takes 5-10 minutes, almost all of it compiling the
+frontend and installing the OCR engine. It will:
+
+    add swap so the build cannot run out of memory
+    install Docker and the Compose plugin
+    generate a .env with fresh random secrets
+    ask which email address you want to sign in with
+    build and start the application, run the migrations
+    create your administrator account and sign in once to prove it works
+    install nginx and certbot, and put nginx in front of the application
+    check the domain really points at this server
+    get the certificate and turn on the HTTP-to-HTTPS redirect
+    confirm the site answers over HTTPS
+    only then make session cookies HTTPS-only
+    print your address, email and password
+
+When it finishes, open https://account.its-abdullah.dev and sign in with the
+password it printed.
+
+Do not paste more than one command at a time. When a command asks for a
+password, anything you pasted after it gets swallowed by the prompt — that is
+what went wrong twice on the old server.
+
+
+PART 4 — the first ten minutes
+-------------------------------
+    1. Change the printed password: sidebar, bottom left, next to your name.
+    2. Delete the file it left behind:   rm /root/reconcilia/FIRST-LOGIN.txt
+    3. Change the server's root password: passwd
+    4. Settings -> Shops: rename "Shop 1/2/3" to your real shops.
+    5. Settings -> Banks: enter the real account numbers.
+    6. Bank statements -> Upload: try one real PDF and check what it read.
+
+
+AFTERWARDS
+----------
+Changed the code and want it live:
+
+    cd /root/reconcilia && git pull && ./server-setup.sh --update
+
+Back up the database and the stored PDFs:
+
+    cd /root/reconcilia && ./backup.sh
+
+Watch what is happening:
+
+    cd /root/reconcilia && docker compose logs -f api worker
+
+The certificate renews itself through the certbot systemd timer. There is
+nothing to do about it.
+
+
+STILL OUTSTANDING
+-----------------
+  * Revoke the GitHub token you pasted into the chat. It was never used
+    successfully, but it is in a transcript.
+  * FICOHSA has no parser yet — send one real FICOHSA statement PDF and it can
+    be written. BAC, LAFISE and BANPRO are done and tested against your real
+    statements.
