@@ -14,6 +14,7 @@ const STATUS_STYLES: Record<string, string> = {
   POSSIBLE: "bg-amber-50 text-amber-800 ring-amber-600/20",
   UNMATCHED: "bg-red-50 text-red-700 ring-red-600/20",
   IGNORED: "bg-ink-100 text-ink-600 ring-ink-500/20",
+  PENDING_DEPOSIT: "bg-sky-50 text-sky-700 ring-sky-600/20",
   DEMO: "bg-violet-50 text-violet-700 ring-violet-600/20",
   ACTIVE: "bg-emerald-50 text-emerald-700 ring-emerald-600/20",
   INACTIVE: "bg-ink-100 text-ink-600 ring-ink-500/20",
@@ -36,6 +37,7 @@ const STATUS_DOTS: Record<string, string> = {
   POSSIBLE: "bg-amber-500",
   UNMATCHED: "bg-red-500",
   IGNORED: "bg-ink-400",
+  PENDING_DEPOSIT: "bg-sky-500",
 };
 
 export function StatusBadge({ status, dot = true }: { status: string; dot?: boolean }) {

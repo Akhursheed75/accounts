@@ -1,5 +1,6 @@
 export type Currency = "USD" | "NIO";
-export type MatchStatus = "MATCHED" | "POSSIBLE" | "UNMATCHED" | "IGNORED";
+export type MatchStatus = "MATCHED" | "POSSIBLE" | "UNMATCHED" | "IGNORED" | "PENDING_DEPOSIT";
+export type PaymentMethod = "BANK" | "CASH";
 
 export interface ApiErrorBody {
   error: { code: string; message: string; details?: unknown };
@@ -39,7 +40,8 @@ export interface Bank {
 export interface Page<T> { items: T[]; total: number; page: number; page_size: number }
 
 export interface Transfer {
-  id: number; bank_id: number; bank_code: string | null; bank_name: string | null;
+  id: number; payment_method: PaymentMethod;
+  bank_id: number | null; bank_code: string | null; bank_name: string | null;
   bank_account_id: number | null; currency_code: Currency; amount: string;
   reference: string | null; deposit_time: string | null; note: string;
   is_ignored: boolean; ignored_reason: string | null;
@@ -83,7 +85,8 @@ export interface DailyRecord {
   created_at: string; updated_at: string; submitted_at: string | null;
   locked_at: string | null; is_demo: boolean;
   transfers: Transfer[]; expenses: Expense[]; bale_records: BaleRow[];
-  transfer_totals: Record<string, string>; expense_totals: Record<string, string>;
+  transfer_totals: Record<string, string>; cash_totals: Record<string, string>;
+  expense_totals: Record<string, string>;
   balance: Record<string, BalanceSide>;
 }
 
@@ -92,7 +95,9 @@ export interface DailyRecordRow {
   status: string; bale_count: number; invoice_count: number;
   total_sales_usd: string; total_sales_nio: string;
   transfer_total_usd: string; transfer_total_nio: string;
+  cash_total_usd: string; cash_total_nio: string;
   matched_count: number; possible_count: number; unmatched_count: number;
+  pending_cash_count: number;
 }
 
 export interface Statement {
@@ -132,7 +137,8 @@ export interface Match {
 
 export interface TransferSide {
   id: number; shop_id: number; shop_name: string | null; business_date: string;
-  bank_id: number; bank_code: string | null; currency_code: Currency;
+  payment_method: PaymentMethod; bank_id: number | null; bank_code: string | null;
+  currency_code: Currency;
   amount: string; reference: string | null; note: string; is_ignored: boolean;
 }
 
@@ -179,7 +185,7 @@ export interface ReportResult {
 export interface MatchSettings {
   date_window_days: number; amount_tolerance: string; auto_confirm_score: number;
   suggest_score: number; auto_confirm_requires_unique: boolean;
-  match_debit_transactions: boolean;
+  match_debit_transactions: boolean; cash_deposit_window_days: number;
 }
 
 export interface BalanceComponent { key: string; label: string; sign: number; enabled: boolean }
@@ -209,4 +215,30 @@ export interface UnmatchedSummary {
     shop_payments: { count: number; USD: string; NIO: string };
     bank_transactions: { count: number; USD: string; NIO: string };
   };
+}
+
+/* ----------------------------------------------------------- monthly records */
+
+export interface MonthSummary {
+  month: string; label: string; is_current: boolean; sheet_count: number; rate: string | null;
+}
+
+export interface MonthBucket {
+  sheets: number; shops: string[];
+  sales_usd: string; sales_nio: string; bank_usd: string; bank_nio: string;
+  cash_usd: string; cash_nio: string; expenses_usd: string; expenses_nio: string;
+  /** The USD view. null when no rate is set for the month. */
+  sales_in_usd: string | null; bank_in_usd: string | null; cash_in_usd: string | null;
+  received_in_usd: string | null; expenses_in_usd: string | null;
+  matched: number; possible: number; unmatched: number; pending_cash: number;
+}
+
+export interface MonthDay extends MonthBucket {
+  date: string; day: number; weekday: string; is_future: boolean;
+}
+
+export interface MonthDetail {
+  month: string; label: string; shop_id: number | null; shop_name: string | null;
+  rate: string | null; rate_updated_at: string | null;
+  days: MonthDay[]; totals: MonthBucket;
 }

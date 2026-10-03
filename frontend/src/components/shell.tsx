@@ -1,7 +1,7 @@
 "use client";
 
 import {
-  BarChart3, ClipboardList, FileSpreadsheet, FileText, GitCompareArrows, KeyRound,
+  BarChart3, CalendarDays, ClipboardList, FileSpreadsheet, FileText, GitCompareArrows, KeyRound,
   LayoutDashboard, ListChecks, LogOut, Menu, Moon, ScrollText, Settings, Sun, X,
 } from "lucide-react";
 import Link from "next/link";
@@ -24,6 +24,7 @@ interface NavItem {
 const NAV: NavItem[] = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard, permission: "dashboard.view" },
   { href: "/accounting", label: "Daily accounting", icon: ClipboardList, permission: "accounting.read" },
+  { href: "/monthly", label: "Monthly records", icon: CalendarDays, permission: "report.read" },
   { href: "/statements", label: "Bank statements", icon: FileText, permission: "statement.read" },
   { href: "/transactions", label: "Transactions", icon: ListChecks, permission: "transaction.read" },
   { href: "/reconciliation", label: "Reconciliation", icon: GitCompareArrows, permission: "reconciliation.read" },

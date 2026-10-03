@@ -129,6 +129,7 @@ export default function ReconciliationPage() {
               <option value="MATCHED">Matched</option>
               <option value="POSSIBLE">Possible</option>
               <option value="UNMATCHED">Unmatched</option>
+              <option value="PENDING_DEPOSIT">Cash — pending deposit</option>
               <option value="IGNORED">Ignored</option>
             </select>
           </label>

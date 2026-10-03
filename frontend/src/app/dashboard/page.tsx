@@ -230,12 +230,15 @@ function ReconStat({ data }: { data: Dashboard }) {
             { label: "Matched", value: counts.MATCHED ?? 0, className: "bg-emerald-500" },
             { label: "Possible", value: counts.POSSIBLE ?? 0, className: "bg-amber-500" },
             { label: "Unmatched", value: counts.UNMATCHED ?? 0, className: "bg-red-500" },
+            { label: "Cash pending deposit", value: counts.PENDING_DEPOSIT ?? 0, className: "bg-sky-500" },
             { label: "Ignored", value: counts.IGNORED ?? 0, className: "bg-ink-400" },
           ]}
         />
       </div>
       <ul className="mt-3 space-y-1.5 text-xs">
-        {(["MATCHED", "POSSIBLE", "UNMATCHED"] as const).map((state) => (
+        {(["MATCHED", "POSSIBLE", "UNMATCHED", "PENDING_DEPOSIT"] as const)
+          .filter((state) => state !== "PENDING_DEPOSIT" || (counts[state] ?? 0) > 0)
+          .map((state) => (
           <li key={state} className="flex items-center justify-between gap-2">
             <StatusBadge status={state} />
             <span className="tabular text-ink-700">

@@ -693,6 +693,21 @@ function MatchingTab() {
           </span>
         </label>
         <label className="block">
+          <span className="label">Cash deposit window (days)</span>
+          <input
+            type="number" min={0} max={31} className="input tabular"
+            value={current.cash_deposit_window_days}
+            disabled={!can("settings.manage")}
+            onChange={(e) =>
+              setDraft({ ...current, cash_deposit_window_days: Number(e.target.value) })
+            }
+          />
+          <span className="mt-1 block text-xs text-ink-500">
+            How many days after the sheet a cash payment may be deposited. Cash is matched to a
+            deposit in any bank and always waits for a person to confirm.
+          </span>
+        </label>
+        <label className="block">
           <span className="label">Amount tolerance</span>
           <input
             className="input tabular" inputMode="decimal"

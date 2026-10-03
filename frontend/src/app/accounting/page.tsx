@@ -2,7 +2,7 @@
 
 import { Plus } from "lucide-react";
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { PageHeader } from "@/components/shell";
 import { Card, ErrorNote, EmptyState, Pagination, Spinner, StatusBadge } from "@/components/ui";
@@ -19,6 +19,14 @@ export default function AccountingListPage() {
   const [to, setTo] = useState("");
   const [status, setStatus] = useState("");
   const [page, setPage] = useState(1);
+
+  // Monthly Records links here with ?date_from=…&date_to=… for one day.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("date_from")) setFrom(params.get("date_from")!);
+    if (params.get("date_to")) setTo(params.get("date_to")!);
+    if (params.get("shop_id")) setShopId(params.get("shop_id")!);
+  }, []);
 
   const shops = useApi(() => api.get<Shop[]>("/shops"), []);
   const { data, error, loading } = useApi(
@@ -114,6 +122,7 @@ export default function AccountingListPage() {
                     <th className="th text-right">Sales C$</th>
                     <th className="th text-right">Banked USD</th>
                     <th className="th text-right">Banked C$</th>
+                    <th className="th text-right">Cash</th>
                     <th className="th">Reconciliation</th>
                     <th className="th"></th>
                   </tr>
@@ -129,6 +138,9 @@ export default function AccountingListPage() {
                       <td className="td tabular text-right">{money(row.total_sales_nio, "NIO")}</td>
                       <td className="td tabular text-right">{money(row.transfer_total_usd, "USD")}</td>
                       <td className="td tabular text-right">{money(row.transfer_total_nio, "NIO")}</td>
+                      <td className="td tabular text-right text-xs leading-tight">
+                        <CashCell row={row} />
+                      </td>
                       <td className="td"><ReconCounts row={row} /></td>
                       <td className="td text-right">
                         <Link href={`/accounting/${row.id}`} className="btn-secondary btn-sm">
@@ -168,6 +180,12 @@ export default function AccountingListPage() {
                         <dt className="text-ink-500">Banked C$</dt>
                         <dd className="tabular">{money(row.transfer_total_nio, "NIO")}</dd>
                       </div>
+                      {(Number(row.cash_total_usd) > 0 || Number(row.cash_total_nio) > 0) && (
+                        <div className="col-span-2 flex justify-between">
+                          <dt className="text-ink-500">Cash</dt>
+                          <dd className="tabular"><CashCell row={row} /></dd>
+                        </div>
+                      )}
                     </dl>
                     <div className="mt-2"><ReconCounts row={row} /></div>
                   </Link>
@@ -188,6 +206,7 @@ function ReconCounts({ row }: { row: DailyRecordRow }) {
     { count: row.matched_count, status: "MATCHED" as const },
     { count: row.possible_count, status: "POSSIBLE" as const },
     { count: row.unmatched_count, status: "UNMATCHED" as const },
+    { count: row.pending_cash_count, status: "PENDING_DEPOSIT" as const },
   ].filter((item) => item.count > 0);
   if (items.length === 0) return <span className="text-xs text-ink-400">No payments</span>;
   return (
@@ -199,5 +218,19 @@ function ReconCounts({ row }: { row: DailyRecordRow }) {
         </span>
       ))}
     </div>
+  );
+}
+
+function CashCell({ row }: { row: DailyRecordRow }) {
+  const parts = [];
+  if (Number(row.cash_total_usd) > 0) parts.push(money(row.cash_total_usd, "USD"));
+  if (Number(row.cash_total_nio) > 0) parts.push(money(row.cash_total_nio, "NIO"));
+  if (parts.length === 0) return <span className="text-ink-300">–</span>;
+  return (
+    <>
+      {parts.map((part) => (
+        <span key={part} className="block">{part}</span>
+      ))}
+    </>
   );
 }

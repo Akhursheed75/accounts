@@ -59,10 +59,14 @@ def dashboard(
         ).where(*record_filter)
     ).one()
 
+    # "Banked by shops" means bank payments; cash is not in a bank until it is deposited.
     transfer_stmt = (
         select(ShopTransfer.currency_code, func.sum(ShopTransfer.amount))
         .join(ShopDailyRecord, ShopTransfer.daily_record_id == ShopDailyRecord.id)
-        .where(*record_filter, ShopTransfer.deleted_at.is_(None))
+        .where(
+            *record_filter, ShopTransfer.deleted_at.is_(None),
+            ShopTransfer.payment_method == "BANK",
+        )
         .group_by(ShopTransfer.currency_code)
     )
     if bank_id:
@@ -92,12 +96,10 @@ def dashboard(
         )
     )
     statuses = recon.transfer_statuses(db, [t.id for t, _ in pairs])
-    counts = {"MATCHED": 0, "POSSIBLE": 0, "UNMATCHED": 0, "IGNORED": 0}
+    counts = {"MATCHED": 0, "POSSIBLE": 0, "UNMATCHED": 0, recon.PENDING_DEPOSIT: 0, "IGNORED": 0}
     amounts = {k: {"USD": ZERO, "NIO": ZERO} for k in counts}
     for transfer, _record in pairs:
-        state = "IGNORED" if transfer.is_ignored else statuses.get(
-            transfer.id, {}
-        ).get("status", "UNMATCHED")
+        state = recon.display_status(transfer, statuses.get(transfer.id))
         counts[state] += 1
         amounts[state][transfer.currency_code] += transfer.amount
 

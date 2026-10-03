@@ -1,6 +1,6 @@
 "use client";
 
-import { Loader2, Plus, Trash2 } from "lucide-react";
+import { AlertTriangle, Banknote, Landmark, Loader2, Plus, Trash2 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -10,12 +10,13 @@ import { useAuth } from "@/lib/auth";
 import { money, today } from "@/lib/format";
 import { useApi } from "@/lib/hooks";
 import type {
-  BalanceSide, BaleType, Bank, Currency, DailyRecord, Shop,
+  BalanceSide, BaleType, Bank, Currency, DailyRecord, PaymentMethod, Shop,
 } from "@/lib/types";
 
 interface TransferDraft {
   key: string;
   id?: number;
+  payment_method: PaymentMethod;
   bank_id: string;
   bank_account_id: string;
   currency_code: Currency;
@@ -114,7 +115,8 @@ export function RecordForm({ record }: { record?: DailyRecord }) {
     record?.transfers.map((t) => ({
       key: newKey(),
       id: t.id,
-      bank_id: String(t.bank_id),
+      payment_method: t.payment_method ?? "BANK",
+      bank_id: t.bank_id ? String(t.bank_id) : "",
       bank_account_id: t.bank_account_id ? String(t.bank_account_id) : "",
       currency_code: t.currency_code,
       amount: t.amount,
@@ -176,10 +178,48 @@ export function RecordForm({ record }: { record?: DailyRecord }) {
   // Memoised so the callbacks below are not rebuilt on every keystroke.
   const bankList = useMemo(() => banks.data ?? [], [banks.data]);
 
+  // Bank and cash are separate lines on the sheet, as they are on paper.
   const transferTotals = useMemo(() => {
     const totals = { USD: 0, NIO: 0 };
-    for (const transfer of transfers) totals[transfer.currency_code] += num(transfer.amount);
+    for (const t of transfers) if (t.payment_method === "BANK") totals[t.currency_code] += num(t.amount);
     return totals;
+  }, [transfers]);
+
+  const cashTotals = useMemo(() => {
+    const totals = { USD: 0, NIO: 0 };
+    for (const t of transfers) if (t.payment_method === "CASH") totals[t.currency_code] += num(t.amount);
+    return totals;
+  }, [transfers]);
+
+  // The month's rate, if an administrator has set one, so the day's payments
+  // can also be read as a single USD figure. Display only: nothing is saved.
+  const rate = useApi(
+    () => api.get<{ nio_per_usd: string | null }>("/monthly/rate", { on: date }),
+    [date.slice(0, 7)],
+  );
+  const nioPerUsd = rate.data?.nio_per_usd ? Number(rate.data.nio_per_usd) : null;
+  const receivedInUsd =
+    nioPerUsd && nioPerUsd > 0
+      ? transferTotals.USD + cashTotals.USD + (transferTotals.NIO + cashTotals.NIO) / nioPerUsd
+      : null;
+
+  // Two identical rows are usually one slip typed twice.
+  const duplicateKeys = useMemo(() => {
+    const seen = new Map<string, string>();
+    const dupes = new Set<string>();
+    for (const t of transfers) {
+      const amount = num(t.amount);
+      if (!(amount > 0)) continue;
+      const id = `${t.payment_method}|${t.bank_id}|${t.currency_code}|${amount.toFixed(2)}|${t.reference.trim()}`;
+      const first = seen.get(id);
+      if (first) {
+        dupes.add(first);
+        dupes.add(t.key);
+      } else {
+        seen.set(id, t.key);
+      }
+    }
+    return dupes;
   }, [transfers]);
 
   const expenseTotals = useMemo(() => {
@@ -192,10 +232,10 @@ export function RecordForm({ record }: { record?: DailyRecord }) {
   // server remains the authority and returns its own breakdown after saving.
   const computed = useMemo(
     () => ({
-      USD: num(openUsd) + num(salesUsd) - expenseTotals.USD - transferTotals.USD,
-      NIO: num(openNio) + num(salesNio) - expenseTotals.NIO - transferTotals.NIO,
+      USD: num(openUsd) + num(salesUsd) - expenseTotals.USD - transferTotals.USD - cashTotals.USD,
+      NIO: num(openNio) + num(salesNio) - expenseTotals.NIO - transferTotals.NIO - cashTotals.NIO,
     }),
-    [openUsd, openNio, salesUsd, salesNio, expenseTotals, transferTotals],
+    [openUsd, openNio, salesUsd, salesNio, expenseTotals, transferTotals, cashTotals],
   );
 
   // Focus moves to the amount of whichever row was just created, so a second
@@ -209,27 +249,38 @@ export function RecordForm({ record }: { record?: DailyRecord }) {
     setFocusRow(null);
   }, [focusRow, transfers]);
 
-  const addTransfer = useCallback(() => {
-    const key = newKey();
-    setTransfers((rows) => {
-      // Most days a shop banks into the same place twice, so a new row starts
-      // from the previous one rather than from the top of the list.
-      const previous = rows[rows.length - 1];
-      return [
-        ...rows,
-        {
-          key,
-          bank_id: previous?.bank_id || (bankList[0] ? String(bankList[0].id) : ""),
-          bank_account_id: previous?.bank_account_id ?? "",
-          currency_code: previous?.currency_code ?? "USD",
-          amount: "",
-          reference: "",
-          note: "",
-        },
-      ];
-    });
-    setFocusRow(key);
-  }, [bankList]);
+  const addTransfer = useCallback(
+    (method?: PaymentMethod) => {
+      const key = newKey();
+      setTransfers((rows) => {
+        // Most days a shop banks into the same place twice, so a new row starts
+        // from the previous one rather than from the top of the list — unless
+        // the button pressed says which kind of payment it is.
+        const previous = rows[rows.length - 1];
+        const paymentMethod = method ?? previous?.payment_method ?? "BANK";
+        const lastBank = [...rows].reverse().find((r) => r.payment_method === "BANK");
+        return [
+          ...rows,
+          {
+            key,
+            payment_method: paymentMethod,
+            bank_id:
+              paymentMethod === "CASH"
+                ? ""
+                : lastBank?.bank_id || (bankList[0] ? String(bankList[0].id) : ""),
+            bank_account_id:
+              paymentMethod === "CASH" ? "" : (lastBank?.bank_account_id ?? ""),
+            currency_code: previous?.currency_code ?? "USD",
+            amount: "",
+            reference: "",
+            note: "",
+          },
+        ];
+      });
+      setFocusRow(key);
+    },
+    [bankList],
+  );
 
   function updateTransfer(key: string, patch: Partial<TransferDraft>) {
     setTransfers((rows) => rows.map((row) => (row.key === key ? { ...row, ...patch } : row)));
@@ -241,7 +292,11 @@ export function RecordForm({ record }: { record?: DailyRecord }) {
 
     const badTransfer = transfers.find((t) => !(num(t.amount) > 0));
     if (badTransfer) {
-      setError(new Error("Every bank transfer needs an amount greater than zero."));
+      setError(new Error("Every payment needs an amount greater than zero."));
+      return;
+    }
+    if (transfers.some((t) => t.payment_method === "BANK" && !t.bank_id)) {
+      setError(new Error("Choose the bank for every bank payment, or mark it as cash."));
       return;
     }
     if (!shopId) {
@@ -271,8 +326,10 @@ export function RecordForm({ record }: { record?: DailyRecord }) {
       status,
       transfers: transfers.map((t) => ({
         id: t.id,
-        bank_id: Number(t.bank_id),
-        bank_account_id: t.bank_account_id ? Number(t.bank_account_id) : null,
+        payment_method: t.payment_method,
+        bank_id: t.payment_method === "CASH" ? null : Number(t.bank_id),
+        bank_account_id:
+          t.payment_method === "CASH" || !t.bank_account_id ? null : Number(t.bank_account_id),
         currency_code: t.currency_code,
         amount: cleanAmount(t.amount),
         reference: t.reference || null,
@@ -379,143 +436,227 @@ export function RecordForm({ record }: { record?: DailyRecord }) {
       </Card>
 
       <Card
-        title="C · Bank transfers"
-        description="Add one row per deposit. A bank can appear as many times as needed in a day."
+        title="C · Payments received"
+        description="One row per bank deposit. Cash taken at the shop goes in as cash — it is matched to the bank deposit later."
         actions={
           !readOnly && (
-            <button type="button" className="btn-secondary btn-sm" onClick={addTransfer}>
-              <Plus className="h-3.5 w-3.5" />
-              Add transfer
-            </button>
+            <div className="flex flex-wrap gap-2">
+              <button type="button" className="btn-secondary btn-sm" onClick={() => addTransfer("BANK")}>
+                <Landmark className="h-3.5 w-3.5" />
+                Add bank payment
+              </button>
+              <button type="button" className="btn-secondary btn-sm" onClick={() => addTransfer("CASH")}>
+                <Banknote className="h-3.5 w-3.5" />
+                Add cash
+              </button>
+            </div>
           )
         }
       >
         {transfers.length === 0 ? (
-          <p className="py-3 text-sm text-ink-500">
-            No transfers recorded for this day yet.
-          </p>
+          <div className="flex flex-col items-center gap-3 py-5 text-center">
+            <p className="text-sm text-ink-500">No payments recorded for this day yet.</p>
+            {!readOnly && (
+              <div className="flex flex-wrap justify-center gap-2">
+                <button type="button" className="btn-primary btn-sm" onClick={() => addTransfer("BANK")}>
+                  <Landmark className="h-3.5 w-3.5" />
+                  Add bank payment
+                </button>
+                <button type="button" className="btn-secondary btn-sm" onClick={() => addTransfer("CASH")}>
+                  <Banknote className="h-3.5 w-3.5" />
+                  Add cash
+                </button>
+              </div>
+            )}
+          </div>
         ) : (
-          <div className="space-y-3">
-            {transfers.map((transfer) => {
+          <div className="space-y-2">
+            {transfers.map((transfer, index) => {
+              const cash = transfer.payment_method === "CASH";
               const bank = bankList.find((b) => String(b.id) === transfer.bank_id);
               const accounts = (bank?.accounts ?? []).filter(
                 (a) => a.currency_code === transfer.currency_code,
               );
+              const duplicate = duplicateKeys.has(transfer.key);
               return (
                 <div
                   key={transfer.key}
-                  className="grid gap-2 rounded-lg border border-ink-200 bg-ink-50/60 p-3 sm:grid-cols-12"
+                  className={`rounded-lg border p-3 ${
+                    cash ? "border-sky-200 bg-sky-50/50" : "border-ink-200 bg-ink-50/60"
+                  }`}
                 >
-                  <label className="sm:col-span-3">
-                    <span className="label">Bank</span>
-                    <select
-                      className="input"
-                      value={transfer.bank_id}
-                      disabled={readOnly}
-                      onChange={(e) =>
-                        updateTransfer(transfer.key, { bank_id: e.target.value, bank_account_id: "" })
-                      }
-                    >
-                      {bankList.map((b) => (
-                        <option key={b.id} value={b.id}>
-                          {b.code}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="sm:col-span-2">
-                    <span className="label">Currency</span>
-                    <select
-                      className="input"
-                      value={transfer.currency_code}
-                      disabled={readOnly}
-                      onChange={(e) =>
-                        updateTransfer(transfer.key, {
-                          currency_code: e.target.value as Currency,
-                          bank_account_id: "",
-                        })
-                      }
-                    >
-                      <option value="USD">USD $</option>
-                      <option value="NIO">Cordoba C$</option>
-                    </select>
-                  </label>
-                  <label className="sm:col-span-2">
-                    <span className="label">Amount</span>
-                    <input
-                      ref={(el) => {
-                        amountInputs.current[transfer.key] = el;
-                      }}
-                      className={`input tabular ${
-                        invalidAmount(transfer.amount) ? "border-red-500 focus:border-red-500" : ""
-                      }`}
-                      inputMode="decimal"
-                      value={transfer.amount}
-                      disabled={readOnly}
-                      onChange={(e) => updateTransfer(transfer.key, { amount: e.target.value })}
-                      onBlur={(e) =>
-                        updateTransfer(transfer.key, { amount: cleanAmount(e.target.value) })
-                      }
-                      onKeyDown={(e) => {
-                        if (e.key !== "Enter") return;
-                        // Enter would otherwise submit the whole sheet; here it
-                        // means "this one is done, give me another row".
-                        e.preventDefault();
-                        updateTransfer(transfer.key, { amount: cleanAmount(transfer.amount) });
-                        if (num(transfer.amount) > 0 && !readOnly) addTransfer();
-                      }}
-                      placeholder="0.00"
-                      aria-invalid={invalidAmount(transfer.amount)}
-                    />
-                    {invalidAmount(transfer.amount) && (
-                      <span className="mt-1 block text-xs text-red-600">
-                        Needs to be more than zero
-                      </span>
-                    )}
-                  </label>
-                  <label className="sm:col-span-2">
-                    <span className="label">Account</span>
-                    <select
-                      className="input"
-                      value={transfer.bank_account_id}
-                      disabled={readOnly || accounts.length === 0}
-                      onChange={(e) =>
-                        updateTransfer(transfer.key, { bank_account_id: e.target.value })
-                      }
-                    >
-                      <option value="">Any {transfer.currency_code} account</option>
-                      {accounts.map((account) => (
-                        <option key={account.id} value={account.id}>
-                          {account.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="sm:col-span-2">
-                    <span className="label">Reference</span>
-                    <input
-                      className="input"
-                      value={transfer.reference}
-                      disabled={readOnly}
-                      onChange={(e) => updateTransfer(transfer.key, { reference: e.target.value })}
-                      placeholder="Deposit slip no."
-                    />
-                  </label>
-                  <div className="flex items-end justify-between gap-2 sm:col-span-1">
-                    {transfer.match_status && <StatusBadge status={transfer.match_status} />}
-                    {!readOnly && (
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                    <span className="tabular w-5 text-xs font-semibold text-ink-400">{index + 1}</span>
+
+                    {/* One click picks where the money went: a bank, or cash. */}
+                    <div className="flex flex-wrap gap-1" role="radiogroup" aria-label="Paid by">
+                      {bankList.map((b) => {
+                        const active = !cash && transfer.bank_id === String(b.id);
+                        return (
+                          <button
+                            key={b.id}
+                            type="button"
+                            role="radio"
+                            aria-checked={active}
+                            disabled={readOnly}
+                            onClick={() =>
+                              updateTransfer(transfer.key, {
+                                payment_method: "BANK",
+                                bank_id: String(b.id),
+                                bank_account_id: "",
+                              })
+                            }
+                            className={`rounded-md border px-2 py-1 text-xs font-semibold transition ${
+                              active
+                                ? "border-brand-600 bg-brand-600 text-white"
+                                : "border-ink-300 bg-surface text-ink-700 hover:bg-ink-100"
+                            }`}
+                          >
+                            {b.code}
+                          </button>
+                        );
+                      })}
                       <button
                         type="button"
-                        className="btn-ghost btn-sm text-red-600"
+                        role="radio"
+                        aria-checked={cash}
+                        disabled={readOnly}
                         onClick={() =>
-                          setTransfers((rows) => rows.filter((r) => r.key !== transfer.key))
+                          updateTransfer(transfer.key, {
+                            payment_method: "CASH",
+                            bank_id: "",
+                            bank_account_id: "",
+                          })
                         }
-                        aria-label="Remove transfer"
+                        className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs font-semibold transition ${
+                          cash
+                            ? "border-sky-600 bg-sky-600 text-white"
+                            : "border-ink-300 bg-surface text-ink-700 hover:bg-ink-100"
+                        }`}
                       >
-                        <Trash2 className="h-4 w-4" />
+                        <Banknote className="h-3.5 w-3.5" />
+                        Cash
                       </button>
-                    )}
+                    </div>
+
+                    {/* Currency as a two-way switch: the choice is always one of two. */}
+                    <div className="inline-flex overflow-hidden rounded-md border border-ink-300" role="radiogroup" aria-label="Currency">
+                      {(["USD", "NIO"] as const).map((code) => (
+                        <button
+                          key={code}
+                          type="button"
+                          role="radio"
+                          aria-checked={transfer.currency_code === code}
+                          disabled={readOnly}
+                          onClick={() =>
+                            updateTransfer(transfer.key, { currency_code: code, bank_account_id: "" })
+                          }
+                          className={`px-2.5 py-1 text-xs font-semibold transition ${
+                            transfer.currency_code === code
+                              ? "bg-ink-800 text-white"
+                              : "bg-surface text-ink-600 hover:bg-ink-100"
+                          }`}
+                        >
+                          {code === "USD" ? "$ USD" : "C$"}
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="relative min-w-[8rem] flex-1 sm:max-w-[12rem]">
+                      <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-xs text-ink-400">
+                        {transfer.currency_code === "USD" ? "$" : "C$"}
+                      </span>
+                      <input
+                        ref={(el) => {
+                          amountInputs.current[transfer.key] = el;
+                        }}
+                        className={`input tabular pl-8 text-base font-medium ${
+                          invalidAmount(transfer.amount) ? "border-red-500 focus:border-red-500" : ""
+                        }`}
+                        inputMode="decimal"
+                        value={transfer.amount}
+                        disabled={readOnly}
+                        aria-label={`Amount for payment ${index + 1}`}
+                        onChange={(e) => updateTransfer(transfer.key, { amount: e.target.value })}
+                        onBlur={(e) =>
+                          updateTransfer(transfer.key, { amount: cleanAmount(e.target.value) })
+                        }
+                        onKeyDown={(e) => {
+                          if (e.key !== "Enter") return;
+                          // Enter would otherwise submit the whole sheet; here it
+                          // means "this one is done, give me another row".
+                          e.preventDefault();
+                          updateTransfer(transfer.key, { amount: cleanAmount(transfer.amount) });
+                          if (num(transfer.amount) > 0 && !readOnly) addTransfer();
+                        }}
+                        placeholder="0.00"
+                        aria-invalid={invalidAmount(transfer.amount)}
+                      />
+                    </div>
+
+                    <div className="ml-auto flex items-center gap-2">
+                      {transfer.match_status && <StatusBadge status={transfer.match_status} />}
+                      {!readOnly && (
+                        <button
+                          type="button"
+                          className="btn-ghost btn-sm text-red-600"
+                          onClick={() =>
+                            setTransfers((rows) => rows.filter((r) => r.key !== transfer.key))
+                          }
+                          aria-label={`Remove payment ${index + 1}`}
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      )}
+                    </div>
                   </div>
+
+                  <div className="mt-2 grid gap-2 sm:grid-cols-3 sm:pl-8">
+                    {!cash && (
+                      <select
+                        className="input py-1.5 text-xs"
+                        value={transfer.bank_account_id}
+                        disabled={readOnly || accounts.length === 0}
+                        aria-label="Account"
+                        onChange={(e) =>
+                          updateTransfer(transfer.key, { bank_account_id: e.target.value })
+                        }
+                      >
+                        <option value="">Any {transfer.currency_code === "USD" ? "$" : "C$"} account</option>
+                        {accounts.map((account) => (
+                          <option key={account.id} value={account.id}>
+                            {account.label}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                    <input
+                      className="input py-1.5 text-xs"
+                      value={transfer.reference}
+                      disabled={readOnly}
+                      aria-label="Reference"
+                      onChange={(e) => updateTransfer(transfer.key, { reference: e.target.value })}
+                      placeholder={cash ? "Receipt no. (optional)" : "Deposit slip no."}
+                    />
+                    <input
+                      className={`input py-1.5 text-xs ${cash ? "sm:col-span-2" : ""}`}
+                      value={transfer.note}
+                      disabled={readOnly}
+                      aria-label="Note"
+                      onChange={(e) => updateTransfer(transfer.key, { note: e.target.value })}
+                      placeholder={cash ? "Who paid, or a note" : "Note (optional)"}
+                    />
+                  </div>
+
+                  {invalidAmount(transfer.amount) && (
+                    <p className="mt-1 text-xs text-red-600 sm:pl-8">The amount needs to be more than zero.</p>
+                  )}
+                  {duplicate && (
+                    <p className="mt-1 flex items-center gap-1 text-xs text-amber-700 sm:pl-8">
+                      <AlertTriangle className="h-3.5 w-3.5" />
+                      Same amount entered twice — check it is not the same slip.
+                    </p>
+                  )}
                 </div>
               );
             })}
@@ -524,24 +665,45 @@ export function RecordForm({ record }: { record?: DailyRecord }) {
 
         {!readOnly && transfers.length > 0 && (
           <p className="mt-2 text-xs text-ink-500">
-            Press <kbd className="rounded border border-ink-300 px-1">Enter</kbd> in the amount box
-            to start another row. It keeps the same bank and currency.
+            Press <kbd className="rounded border border-ink-300 px-1">Enter</kbd> in an amount to
+            start the next row with the same bank and currency. Enter the day&apos;s cash as one
+            line per currency — the amount the shop will take to the bank — so it can be matched to
+            that deposit.
           </p>
         )}
 
-        <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-ink-200 pt-3 text-sm">
-          <span className="text-ink-500">
-            Total transfers
-            <span className="ml-1 text-ink-400">
-              ({transfers.length} {transfers.length === 1 ? "payment" : "payments"})
-            </span>
-          </span>
-          <span className="tabular font-medium">
-            <CurrencyTag code="USD" /> {money(transferTotals.USD, "USD")}
-          </span>
-          <span className="tabular font-medium">
-            <CurrencyTag code="NIO" /> {money(transferTotals.NIO, "NIO")}
-          </span>
+        <div className="mt-3 grid gap-2 border-t border-ink-200 pt-3 text-sm sm:grid-cols-3">
+          <div>
+            <p className="text-xs text-ink-500">
+              <Landmark className="mr-1 inline h-3.5 w-3.5" />
+              Bank payments
+            </p>
+            <p className="tabular font-medium">
+              {money(transferTotals.USD, "USD")} · {money(transferTotals.NIO, "NIO")}
+            </p>
+          </div>
+          <div>
+            <p className="text-xs text-ink-500">
+              <Banknote className="mr-1 inline h-3.5 w-3.5" />
+              Cash
+            </p>
+            <p className="tabular font-medium">
+              {money(cashTotals.USD, "USD")} · {money(cashTotals.NIO, "NIO")}
+            </p>
+          </div>
+          <div>
+            <p className="text-xs text-ink-500">Total received in USD</p>
+            {receivedInUsd !== null ? (
+              <p className="tabular font-semibold">
+                {money(receivedInUsd, "USD")}
+                <span className="ml-1 text-xs font-normal text-ink-500">
+                  at C${nioPerUsd} per $1
+                </span>
+              </p>
+            ) : (
+              <p className="text-xs text-ink-500">Shown once this month&apos;s exchange rate is set.</p>
+            )}
+          </div>
         </div>
       </Card>
 
@@ -752,7 +914,7 @@ export function RecordForm({ record }: { record?: DailyRecord }) {
             </div>
           </div>
           <p className="mt-2 text-xs text-ink-500">
-            Starting balance + sales − expenses − amounts deposited to banks. The exact
+            Starting balance + sales − expenses − bank payments − cash received. The exact
             components are configurable in Settings, and the saved sheet shows the calculation
             step by step.
           </p>
@@ -773,7 +935,13 @@ export function RecordForm({ record }: { record?: DailyRecord }) {
         <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3">
           <div className="text-xs text-ink-500">
             <span className="hidden sm:inline">Review &amp; save · </span>
-            Transfers {money(transferTotals.USD, "USD")} / {money(transferTotals.NIO, "NIO")}
+            {transfers.length} {transfers.length === 1 ? "payment" : "payments"} ·{" "}
+            {receivedInUsd !== null
+              ? `${money(receivedInUsd, "USD")} received`
+              : `${money(transferTotals.USD + cashTotals.USD, "USD")} / ${money(
+                  transferTotals.NIO + cashTotals.NIO,
+                  "NIO",
+                )} received`}
           </div>
           <div className="flex gap-2">
             <button type="button" className="btn-secondary btn-sm" onClick={() => router.back()}>

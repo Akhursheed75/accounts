@@ -113,7 +113,13 @@ export default function UnmatchedPage() {
                         <tr key={payment.id} className="hover:bg-ink-50">
                           <td className="td">{shortDate(payment.business_date)}</td>
                           <td className="td font-medium">{payment.shop_name}</td>
-                          <td className="td">{payment.bank_code}</td>
+                          <td className="td">
+                            {payment.payment_method === "CASH" ? (
+                              <StatusBadge status="PENDING_DEPOSIT" />
+                            ) : (
+                              payment.bank_code
+                            )}
+                          </td>
                           <td className="td"><CurrencyTag code={payment.currency_code} /></td>
                           <td className="td tabular text-right font-medium">
                             {money(payment.amount, payment.currency_code)}
@@ -132,7 +138,8 @@ export default function UnmatchedPage() {
                       <div className="min-w-0">
                         <p className="text-sm font-medium">{payment.shop_name}</p>
                         <p className="text-xs text-ink-500">
-                          {shortDate(payment.business_date)} · {payment.bank_code}
+                          {shortDate(payment.business_date)} ·{" "}
+                          {payment.payment_method === "CASH" ? "Cash, not banked yet" : payment.bank_code}
                         </p>
                       </div>
                       <span className="tabular text-sm font-semibold">
