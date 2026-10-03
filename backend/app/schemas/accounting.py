@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import date, datetime, time
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.schemas.common import ORMModel
 
@@ -22,7 +24,8 @@ def _check_money(value: Decimal | None) -> Decimal:
 
 class TransferIn(BaseModel):
     id: int | None = None
-    bank_id: int
+    payment_method: Literal["BANK", "CASH"] = "BANK"
+    bank_id: int | None = None
     bank_account_id: int | None = None
     currency_code: str = Field(min_length=3, max_length=3)
     amount: Decimal = Field(gt=0)
@@ -40,10 +43,22 @@ class TransferIn(BaseModel):
     def _currency(cls, v: str) -> str:
         return v.upper()
 
+    @model_validator(mode="after")
+    def _bank_matches_method(self) -> "TransferIn":
+        if self.payment_method == "CASH":
+            # Cash has no bank yet. Whatever the form sent is discarded rather
+            # than stored, so a stale dropdown value can never mislead matching.
+            self.bank_id = None
+            self.bank_account_id = None
+        elif self.bank_id is None:
+            raise ValueError("a bank payment needs a bank")
+        return self
+
 
 class TransferOut(ORMModel):
     id: int
-    bank_id: int
+    payment_method: str = "BANK"
+    bank_id: int | None
     bank_code: str | None = None
     bank_name: str | None = None
     bank_account_id: int | None
@@ -221,6 +236,7 @@ class DailyRecordOut(ORMModel):
     expenses: list[ExpenseOut] = []
     bale_records: list[BaleOut] = []
     transfer_totals: dict[str, Decimal] = {}
+    cash_totals: dict[str, Decimal] = {}
     expense_totals: dict[str, Decimal] = {}
     balance: dict[str, BalanceSide] = {}
 
@@ -237,6 +253,9 @@ class DailyRecordRow(ORMModel):
     total_sales_nio: Decimal
     transfer_total_usd: Decimal = Decimal("0.00")
     transfer_total_nio: Decimal = Decimal("0.00")
+    cash_total_usd: Decimal = Decimal("0.00")
+    cash_total_nio: Decimal = Decimal("0.00")
     matched_count: int = 0
     possible_count: int = 0
     unmatched_count: int = 0
+    pending_cash_count: int = 0

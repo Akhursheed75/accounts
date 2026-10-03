@@ -17,19 +17,28 @@ def money(value: Decimal | None) -> Decimal:
     return Decimal(value if value is not None else 0).quantize(Decimal("0.01"))
 
 
-def transfer_totals(record: ShopDailyRecord) -> dict[str, Decimal]:
+def _payment_totals(record: ShopDailyRecord, *, cash: bool) -> dict[str, Decimal]:
     totals = {code: ZERO for code in CURRENCIES}
     for transfer in record.transfers:
-        if transfer.deleted_at is not None:
+        if transfer.deleted_at is not None or transfer.is_cash != cash:
             continue
         totals[transfer.currency_code] = totals.get(transfer.currency_code, ZERO) + transfer.amount
     return {k: money(v) for k, v in totals.items()}
 
 
+def transfer_totals(record: ShopDailyRecord) -> dict[str, Decimal]:
+    """Bank payments only. Cash is its own line on the sheet."""
+    return _payment_totals(record, cash=False)
+
+
+def cash_totals(record: ShopDailyRecord) -> dict[str, Decimal]:
+    return _payment_totals(record, cash=True)
+
+
 def transfer_totals_by_bank(record: ShopDailyRecord) -> dict[int, dict[str, Decimal]]:
     out: dict[int, dict[str, Decimal]] = {}
     for transfer in record.transfers:
-        if transfer.deleted_at is not None:
+        if transfer.deleted_at is not None or transfer.is_cash:
             continue
         bucket = out.setdefault(transfer.bank_id, {c: ZERO for c in CURRENCIES})
         bucket[transfer.currency_code] = bucket.get(transfer.currency_code, ZERO) + transfer.amount
@@ -47,6 +56,8 @@ def _component_value(record: ShopDailyRecord, key: str, currency: str) -> Decima
     suffix = currency.lower()
     if key == "total_transfers":
         return transfer_totals(record)[currency]
+    if key == "total_cash":
+        return cash_totals(record)[currency]
     if key == "total_expenses":
         return expense_totals(record)[currency]
     if key == "total_sales":

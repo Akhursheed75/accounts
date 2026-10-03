@@ -49,8 +49,9 @@ def _transfer_side(transfer: ShopTransfer, record: ShopDailyRecord) -> TransferS
     return TransferSide(
         id=transfer.id, shop_id=record.shop_id,
         shop_name=record.shop.name if record.shop else None,
-        business_date=record.business_date, bank_id=transfer.bank_id,
-        bank_code=transfer.bank.code if transfer.bank else None,
+        business_date=record.business_date, payment_method=transfer.payment_method,
+        bank_id=transfer.bank_id,
+        bank_code=transfer.bank.code if transfer.bank else ("CASH" if transfer.is_cash else None),
         currency_code=transfer.currency_code, amount=transfer.amount,
         reference=transfer.reference, note=transfer.note, is_ignored=transfer.is_ignored,
     )
@@ -122,9 +123,7 @@ def reconciliation_view(
 
     rows: list[ReconciliationRow] = []
     for transfer, record in pairs:
-        state = "IGNORED" if transfer.is_ignored else statuses.get(transfer.id, {}).get(
-            "status", "UNMATCHED"
-        )
+        state = recon.display_status(transfer, statuses.get(transfer.id))
         group = matches.get(transfer.id, [])
         confirmed = next(
             (m for m in group if m.status == "CONFIRMED" and m.is_active), None

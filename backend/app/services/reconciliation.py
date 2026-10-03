@@ -7,7 +7,12 @@ back to the user rather than hidden behind a score.
 
 Three things are hard requirements, never traded off against a good score:
 currency, bank, and amount. Only the date is allowed to be approximate, because
-a deposit made at 5pm can land on the next banking day."""
+a deposit made at 5pm can land on the next banking day.
+
+Cash is the one exception to "bank": a cash payment has no bank until someone
+takes it to one. It may match a deposit in any bank, but only on or after the
+day it was taken, and it is never confirmed automatically — with the bank
+requirement gone there is too little evidence for a machine to decide alone."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -54,9 +59,10 @@ def score_pair(
     settings: MatchSetting,
 ) -> Candidate | None:
     """Returns None when the pair fails a hard requirement."""
+    cash = transfer.is_cash
     if transfer.currency_code != txn.currency_code:
         return None
-    if transfer.bank_id != txn.bank_id:
+    if not cash and transfer.bank_id != txn.bank_id:
         return None
     if transfer.bank_account_id and transfer.bank_account_id != txn.bank_account_id:
         return None
@@ -68,7 +74,11 @@ def score_pair(
         return None
 
     date_delta = (txn.txn_date - record_date).days
-    if abs(date_delta) > settings.date_window_days:
+    if cash:
+        # Cash cannot be banked before it was received.
+        if date_delta < 0 or date_delta > settings.cash_deposit_window_days:
+            return None
+    elif abs(date_delta) > settings.date_window_days:
         return None
 
     breakdown: list[dict] = []
@@ -92,11 +102,17 @@ def score_pair(
          "detail": f"Both are {transfer.currency_code} — required, never assumed"}
     )
 
-    score += SCORE_BANK
-    breakdown.append(
-        {"signal": "bank", "points": SCORE_BANK,
-         "detail": f"Same bank ({txn.bank.code if txn.bank else transfer.bank_id})"}
-    )
+    bank_label = txn.bank.code if txn.bank else txn.bank_id
+    if cash:
+        breakdown.append(
+            {"signal": "cash", "points": 0,
+             "detail": f"Cash payment — deposited at {bank_label}; needs a person to confirm"}
+        )
+    else:
+        score += SCORE_BANK
+        breakdown.append(
+            {"signal": "bank", "points": SCORE_BANK, "detail": f"Same bank ({bank_label})"}
+        )
 
     date_points = SCORE_DATE.get(abs(date_delta), SCORE_DATE_FAR)
     score += date_points
@@ -151,17 +167,26 @@ def find_candidates(
 ) -> list[Candidate]:
     record = transfer.daily_record or db.get(ShopDailyRecord, transfer.daily_record_id)
     record_date = record.business_date
-    window = timedelta(days=settings.date_window_days)
 
     stmt = select(BankTransaction).where(
         BankTransaction.currency_code == transfer.currency_code,
-        BankTransaction.bank_id == transfer.bank_id,
-        BankTransaction.txn_date >= record_date - window,
-        BankTransaction.txn_date <= record_date + window,
         BankTransaction.is_ignored.is_(False),
         BankTransaction.amount >= transfer.amount - settings.amount_tolerance,
         BankTransaction.amount <= transfer.amount + settings.amount_tolerance,
     )
+    if transfer.is_cash:
+        stmt = stmt.where(
+            BankTransaction.txn_date >= record_date,
+            BankTransaction.txn_date
+            <= record_date + timedelta(days=settings.cash_deposit_window_days),
+        )
+    else:
+        window = timedelta(days=settings.date_window_days)
+        stmt = stmt.where(
+            BankTransaction.bank_id == transfer.bank_id,
+            BankTransaction.txn_date >= record_date - window,
+            BankTransaction.txn_date <= record_date + window,
+        )
     if not settings.match_debit_transactions:
         stmt = stmt.where(BankTransaction.direction == "CREDIT")
     if transfer.bank_account_id:
@@ -219,6 +244,9 @@ def run_for_transfer(
     best = candidates[0]
     top_tier = [c for c in candidates if c.score >= settings.auto_confirm_score]
     unique_enough = len(top_tier) == 1 or not settings.auto_confirm_requires_unique
+
+    if transfer.is_cash:
+        allow_auto_confirm = False
 
     if allow_auto_confirm and best.score >= settings.auto_confirm_score and unique_enough:
         match = ReconciliationMatch(
@@ -305,6 +333,20 @@ def run_batch(
 
 
 # ----------------------------------------------------------------- statuses
+PENDING_DEPOSIT = "PENDING_DEPOSIT"
+
+
+def display_status(transfer: ShopTransfer, entry: dict | None) -> str:
+    """What the UI shows. Unmatched cash is not a discrepancy yet — it is money
+    still waiting to be taken to the bank — so it gets its own word."""
+    if transfer.is_ignored:
+        return "IGNORED"
+    status = (entry or {}).get("status", "UNMATCHED")
+    if status == "UNMATCHED" and transfer.is_cash:
+        return PENDING_DEPOSIT
+    return status
+
+
 def transfer_statuses(db: Session, transfer_ids: list[int]) -> dict[int, dict]:
     """MATCHED / POSSIBLE / UNMATCHED for each transfer, in one query."""
     if not transfer_ids:
@@ -462,6 +504,23 @@ def confirm_suggestion(db: Session, match_id: int, user: User, note: str | None)
         new_values={"status": "CONFIRMED", "reason": note},
     )
     return match
+
+
+def release_matches(db: Session, transfer: ShopTransfer, *, reason: str) -> None:
+    """Undo whatever this payment is matched to, keeping the history."""
+    for match in db.scalars(
+        select(ReconciliationMatch).where(
+            ReconciliationMatch.shop_transfer_id == transfer.id,
+            ReconciliationMatch.is_active.is_(True),
+        )
+    ):
+        if match.status == "SUGGESTED":
+            db.delete(match)
+            continue
+        match.is_active = False
+        match.unmatched_at = datetime.now(UTC)
+        match.note = reason
+    db.flush()
 
 
 def unmatch(db: Session, match_id: int, user: User, reason: str | None) -> ReconciliationMatch:

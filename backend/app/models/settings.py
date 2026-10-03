@@ -15,6 +15,7 @@ DEFAULT_BALANCE_COMPONENTS = [
     {"key": "total_sales", "label": "Total sales", "sign": 1, "enabled": True},
     {"key": "total_expenses", "label": "Total expenses", "sign": -1, "enabled": True},
     {"key": "total_transfers", "label": "Deposited to banks", "sign": -1, "enabled": True},
+    {"key": "total_cash", "label": "Cash received", "sign": -1, "enabled": True},
     {"key": "delivery", "label": "Delivery", "sign": -1, "enabled": False},
     {"key": "credit", "label": "Credit given", "sign": -1, "enabled": False},
     {"key": "commercial_invoice", "label": "Commercial invoice", "sign": 0, "enabled": False},

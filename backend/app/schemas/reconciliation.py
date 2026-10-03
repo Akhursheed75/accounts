@@ -38,7 +38,8 @@ class TransferSide(BaseModel):
     shop_id: int
     shop_name: str | None
     business_date: date
-    bank_id: int
+    payment_method: str = "BANK"
+    bank_id: int | None
     bank_code: str | None
     currency_code: str
     amount: Decimal

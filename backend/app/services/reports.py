@@ -21,6 +21,13 @@ from app.services import reconciliation as recon
 ZERO = Decimal("0.00")
 
 
+def payment_label(item) -> str:
+    """Bank code for a bank payment or bank line; CASH for a cash payment."""
+    if getattr(item, "is_cash", False):
+        return "CASH"
+    return item.bank.code if item.bank else ""
+
+
 @dataclass
 class Column:
     key: str
@@ -221,7 +228,7 @@ def _transaction_rows(db: Session, f: Filters, *, currency: str | None = None) -
     return [
         {
             "date": t.txn_date.isoformat(),
-            "bank": t.bank.code if t.bank else "",
+            "bank": payment_label(t),
             "description": t.description,
             "reference": t.reference or t.external_id or "",
             "debit": _money(t.debit), "credit": _money(t.credit),
@@ -301,7 +308,7 @@ def _match_rows(db: Session, f: Filters, statuses: list[str]) -> list[dict]:
             {
                 "date": record.business_date.isoformat(),
                 "shop": record.shop.name if record.shop else "",
-                "bank": transfer.bank.code if transfer.bank else "",
+                "bank": payment_label(transfer),
                 "currency": transfer.currency_code,
                 "amount": _money(transfer.amount),
                 "bank_date": txn.txn_date.isoformat(),
@@ -358,9 +365,7 @@ def unmatched(db: Session, f: Filters) -> ReportResult:
 
     rows = []
     for transfer, record in pairs:
-        state = "IGNORED" if transfer.is_ignored else statuses.get(
-            transfer.id, {}
-        ).get("status", "UNMATCHED")
+        state = recon.display_status(transfer, statuses.get(transfer.id))
         if state == "MATCHED" or state == "IGNORED":
             continue
         rows.append(
@@ -368,7 +373,7 @@ def unmatched(db: Session, f: Filters) -> ReportResult:
                 "side": "Shop payment not found in bank",
                 "date": record.business_date.isoformat(),
                 "shop": record.shop.name if record.shop else "",
-                "bank": transfer.bank.code if transfer.bank else "",
+                "bank": payment_label(transfer),
                 "currency": transfer.currency_code,
                 "amount": _money(transfer.amount),
                 "description": transfer.note or transfer.reference or "",
@@ -443,7 +448,7 @@ def reconciliation_summary(db: Session, f: Filters) -> ReportResult:
         ).get("status", "UNMATCHED")
         key = (
             record.shop.name if record.shop else "",
-            transfer.bank.code if transfer.bank else "",
+            payment_label(transfer),
             transfer.currency_code,
         )
         bucket = buckets.setdefault(

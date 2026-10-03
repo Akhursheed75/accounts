@@ -30,7 +30,7 @@ router = APIRouter(tags=["accounting"])
 # --------------------------------------------------------------- serialising
 def _transfer_out(transfer: ShopTransfer, status: dict) -> TransferOut:
     return TransferOut(
-        id=transfer.id, bank_id=transfer.bank_id,
+        id=transfer.id, payment_method=transfer.payment_method, bank_id=transfer.bank_id,
         bank_code=transfer.bank.code if transfer.bank else None,
         bank_name=transfer.bank.name if transfer.bank else None,
         bank_account_id=transfer.bank_account_id,
@@ -38,7 +38,7 @@ def _transfer_out(transfer: ShopTransfer, status: dict) -> TransferOut:
         reference=transfer.reference, deposit_time=transfer.deposit_time,
         note=transfer.note, is_ignored=transfer.is_ignored,
         ignored_reason=transfer.ignored_reason,
-        match_status="IGNORED" if transfer.is_ignored else status.get("status", "UNMATCHED"),
+        match_status=recon.display_status(transfer, status),
         matched_transaction_id=status.get("transaction_id"),
         suggestion_count=status.get("suggestions", 0),
     )
@@ -81,6 +81,7 @@ def _record_out(db: Session, record: ShopDailyRecord) -> DailyRecordOut:
             for b in record.bale_records
         ],
         transfer_totals=calc.transfer_totals(record),
+        cash_totals=calc.cash_totals(record),
         expense_totals=calc.expense_totals(record),
         balance=calc.balance_breakdown(record, components),
     )
@@ -91,10 +92,12 @@ def _validate_children(db: Session, payload: DailyRecordIn | DailyRecordUpdate) 
     currencies = {c.code for c in db.scalars(select(Currency))}
     bank_ids = {b.id for b in db.scalars(select(Bank))}
     for transfer in payload.transfers:
-        if transfer.bank_id not in bank_ids:
-            raise NotFound(f"Bank {transfer.bank_id} does not exist.")
         if transfer.currency_code not in currencies:
             raise ValidationFailed(f"Currency '{transfer.currency_code}' is not configured.")
+        if transfer.payment_method == "CASH":
+            continue
+        if transfer.bank_id not in bank_ids:
+            raise NotFound(f"Bank {transfer.bank_id} does not exist.")
         if transfer.bank_account_id:
             account = db.get(BankAccount, transfer.bank_account_id)
             if not account:
@@ -150,6 +153,17 @@ def _sync_transfers(db: Session, record: ShopDailyRecord, payload) -> None:
     for item in payload.transfers:
         if item.id and item.id in existing:
             transfer = existing[item.id]
+            changed = (
+                transfer.payment_method != item.payment_method
+                or transfer.bank_id != item.bank_id
+                or transfer.currency_code != item.currency_code
+                or transfer.amount != item.amount
+            )
+            if changed:
+                # A confirmed match was made against the old facts; once the
+                # amount, currency, bank or method changes it no longer proves
+                # anything, so it is undone (kept in history) and re-run.
+                recon.release_matches(db, transfer, reason="Payment edited on the daily sheet")
             for field, value in item.model_dump(exclude={"id"}).items():
                 setattr(transfer, field, value)
             seen.add(item.id)
@@ -209,7 +223,7 @@ def _snapshot(record: ShopDailyRecord) -> dict:
         "closing_balance_nio": record.closing_balance_nio,
         "observations": record.observations,
         "transfers": sorted(
-            f"{t.bank_id}:{t.currency_code}:{t.amount}"
+            f"{'CASH' if t.is_cash else t.bank_id}:{t.currency_code}:{t.amount}"
             for t in record.transfers if t.deleted_at is None
         ),
         "expenses": sorted(f"{e.category}:{e.currency_code}:{e.amount}" for e in record.expenses),
@@ -268,11 +282,12 @@ def list_records(
     for record in rows:
         live = [t for t in record.transfers if t.deleted_at is None]
         totals = calc.transfer_totals(record)
-        counts = {"MATCHED": 0, "POSSIBLE": 0, "UNMATCHED": 0}
+        cash = calc.cash_totals(record)
+        counts = {"MATCHED": 0, "POSSIBLE": 0, "UNMATCHED": 0, recon.PENDING_DEPOSIT: 0}
         for transfer in live:
             if transfer.is_ignored:
                 continue
-            state = statuses.get(transfer.id, {}).get("status", "UNMATCHED")
+            state = recon.display_status(transfer, statuses.get(transfer.id))
             counts[state] = counts.get(state, 0) + 1
         items.append(
             DailyRecordRow(
@@ -283,8 +298,10 @@ def list_records(
                 total_sales_usd=record.total_sales_usd,
                 total_sales_nio=record.total_sales_nio,
                 transfer_total_usd=totals["USD"], transfer_total_nio=totals["NIO"],
+                cash_total_usd=cash["USD"], cash_total_nio=cash["NIO"],
                 matched_count=counts["MATCHED"], possible_count=counts["POSSIBLE"],
                 unmatched_count=counts["UNMATCHED"],
+                pending_cash_count=counts[recon.PENDING_DEPOSIT],
             )
         )
     return Page(items=items, total=total, page=page, page_size=page_size)

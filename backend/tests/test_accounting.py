@@ -60,7 +60,9 @@ def test_closing_balance_is_computed_and_explained(client, admin_headers, world)
     assert usd["computed"] == "600.00"          # 0 opening + 1000 sales - 400 banked
     assert usd["matches"] is True
     labels = [step["label"] for step in usd["steps"]]
-    assert labels == ["Starting balance", "Total sales", "Total expenses", "Deposited to banks"]
+    assert labels == [
+        "Starting balance", "Total sales", "Total expenses", "Deposited to banks", "Cash received",
+    ]
     assert body["closing_balance_usd"] == "600.00"
 
 

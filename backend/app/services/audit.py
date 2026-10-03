@@ -44,6 +44,7 @@ class Actions:
     IGNORE_ITEM = "IGNORE_ITEM"
     EXPORT_REPORT = "EXPORT_REPORT"
     EDIT_SETTINGS = "EDIT_SETTINGS"
+    SET_EXCHANGE_RATE = "SET_EXCHANGE_RATE"
 
 
 def jsonable(value: Any) -> Any:

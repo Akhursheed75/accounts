@@ -87,3 +87,8 @@ class MatchSetting(Base, TimestampMixin):
     match_debit_transactions: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False
     )
+    # Cash is banked some days after it is taken, never before, so a cash
+    # payment looks only forward this many days for its deposit.
+    cash_deposit_window_days: Mapped[int] = mapped_column(
+        Integer, default=7, server_default="7", nullable=False
+    )

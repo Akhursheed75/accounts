@@ -94,13 +94,26 @@ class ShopDailyRecord(Base, TimestampMixin):
     )
 
 
+PAYMENT_BANK = "BANK"
+PAYMENT_CASH = "CASH"
+
+
 class ShopTransfer(Base, TimestampMixin):
-    """A payment the shop says it deposited into a bank. The left-hand side of
-    reconciliation. Several rows per bank per day are expected, not exceptional."""
+    """A payment on the daily sheet. The left-hand side of reconciliation.
+
+    BANK: the shop says the money went into a named bank. Several rows per bank
+    per day are expected, not exceptional.
+    CASH: the shop received cash. No bank is known yet; the payment waits as a
+    pending deposit until it is matched to the bank line where the cash landed."""
 
     __tablename__ = "shop_transfers"
     __table_args__ = (
         CheckConstraint("amount > 0", name="amount_positive"),
+        CheckConstraint("payment_method IN ('BANK','CASH')", name="payment_method_valid"),
+        # The database, not the form, guarantees a bank payment names its bank.
+        CheckConstraint(
+            "payment_method = 'CASH' OR bank_id IS NOT NULL", name="bank_payment_has_bank"
+        ),
         Index("ix_shop_transfers_lookup", "currency_code", "amount", "bank_id"),
     )
 
@@ -108,7 +121,10 @@ class ShopTransfer(Base, TimestampMixin):
     daily_record_id: Mapped[int] = mapped_column(
         ForeignKey("shop_daily_records.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    bank_id: Mapped[int] = mapped_column(ForeignKey("banks.id"), nullable=False, index=True)
+    payment_method: Mapped[str] = mapped_column(
+        String(8), default=PAYMENT_BANK, server_default=PAYMENT_BANK, nullable=False, index=True
+    )
+    bank_id: Mapped[int | None] = mapped_column(ForeignKey("banks.id"), index=True)
     bank_account_id: Mapped[int | None] = mapped_column(ForeignKey("bank_accounts.id"), index=True)
     currency_code: Mapped[str] = mapped_column(
         ForeignKey("currencies.code"), nullable=False, index=True
@@ -123,7 +139,30 @@ class ShopTransfer(Base, TimestampMixin):
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
 
     daily_record: Mapped[ShopDailyRecord] = relationship(back_populates="transfers")
-    bank: Mapped["Bank"] = relationship(lazy="joined")  # noqa: F821
+    bank: Mapped["Bank | None"] = relationship(lazy="joined")  # noqa: F821
+
+    @property
+    def is_cash(self) -> bool:
+        return self.payment_method == PAYMENT_CASH
+
+
+class ExchangeRate(Base, TimestampMixin):
+    """One cordoba-per-dollar rate per calendar month, set by an administrator.
+
+    Used only to *present* figures in USD. Matching never reads it: a C$ payment
+    is still only ever matched to a C$ bank line."""
+
+    __tablename__ = "exchange_rates"
+    __table_args__ = (
+        CheckConstraint("nio_per_usd > 0", name="rate_positive"),
+        CheckConstraint("EXTRACT(DAY FROM month) = 1", name="month_is_first_day"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    # Always the first day of the month.
+    month: Mapped[date] = mapped_column(Date, unique=True, nullable=False)
+    nio_per_usd: Mapped[Decimal] = mapped_column(Numeric(12, 4), nullable=False)
+    set_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
 
 
 class Expense(Base, TimestampMixin):

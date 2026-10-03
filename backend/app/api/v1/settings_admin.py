@@ -25,6 +25,7 @@ class MatchSettingsOut(ORMModel):
     suggest_score: int
     auto_confirm_requires_unique: bool
     match_debit_transactions: bool
+    cash_deposit_window_days: int
 
 
 class MatchSettingsIn(BaseModel):
@@ -34,6 +35,7 @@ class MatchSettingsIn(BaseModel):
     suggest_score: int | None = Field(None, ge=0, le=100)
     auto_confirm_requires_unique: bool | None = None
     match_debit_transactions: bool | None = None
+    cash_deposit_window_days: int | None = Field(None, ge=0, le=31)
 
 
 class BalanceComponent(BaseModel):
