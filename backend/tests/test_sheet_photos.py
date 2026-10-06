@@ -196,3 +196,39 @@ def test_a_shop_user_cannot_see_another_users_unattached_photo(
     photo_id = upload(client, admin_headers).json()["photo"]["id"]
     assert client.get(f"/api/v1/accounting/photos/{photo_id}/file",
                       headers=shop_headers).status_code == 403
+
+
+# ----------------------------------------------------- the free Gemini reader
+def test_gemini_reads_the_sheet_when_it_is_the_only_key(client, admin_headers, monkeypatch, world):
+    sent: dict = {}
+
+    def fake_post(url, json, headers, timeout):
+        sent.update(url=url, body=json, headers=headers)
+        import json as _json
+        text = "```json\n" + _json.dumps(JINOTEGA) + "\n```"
+        return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": text}]}}]})
+
+    monkeypatch.setattr(settings, "anthropic_api_key", None)
+    monkeypatch.setattr(settings, "gemini_api_key", "free-key")
+    monkeypatch.setattr(sheet_reader.httpx, "post", fake_post)
+    rename("SHOP2", "Jinotega")
+    body = upload(client, admin_headers).json()
+    assert body["reader_available"] is True
+    assert sent["url"].endswith(f"/models/{settings.gemini_model}:generateContent")
+    assert sent["headers"]["x-goog-api-key"] == "free-key"
+    parts = sent["body"]["contents"][0]["parts"]
+    assert parts[0]["inline_data"]["mime_type"] == "image/jpeg"
+    assert "JSON schema" in parts[1]["text"]
+    assert body["draft"]["shop_id"] == world["shops"]["SHOP2"]
+    assert sorted(t["amount"] for t in body["draft"]["transfers"]) == ["10.00", "18000.00", "19030.00", "7000.00"]
+    assert body["photo"]["extraction_model"] == settings.gemini_model
+
+
+def test_gemini_free_limit_is_explained(client, admin_headers, monkeypatch):
+    monkeypatch.setattr(settings, "anthropic_api_key", None)
+    monkeypatch.setattr(settings, "gemini_api_key", "free-key")
+    monkeypatch.setattr(sheet_reader.httpx, "post",
+                        lambda *a, **k: httpx.Response(429, json={"error": {"message": "quota"}}))
+    body = upload(client, admin_headers).json()
+    assert body["draft"] is None
+    assert "free reading limit" in body["photo"]["extraction_error"]

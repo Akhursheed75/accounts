@@ -43,6 +43,12 @@ class Settings(BaseSettings):
     sheet_reader_model: str = "claude-sonnet-5-5"
     sheet_reader_timeout: int = 120
     max_photo_bytes: int = 15 * 1024 * 1024
+    # Free alternative: Google Gemini (free tier from aistudio.google.com). Used
+    # when no ANTHROPIC_API_KEY is set. On the free tier Google may use the
+    # photos to improve its models.
+    gemini_api_key: str | None = None
+    gemini_base_url: str = "https://generativelanguage.googleapis.com"
+    gemini_model: str = "gemini-flash-latest"
     poppler_path: str | None = None
 
     # --- reconciliation defaults ---------------------------------------

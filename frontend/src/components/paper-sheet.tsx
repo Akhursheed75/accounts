@@ -1310,8 +1310,9 @@ function PhotoDrop({
           </p>
           {!readerAvailable && (
             <p className="mx-auto mt-2 max-w-md rounded border border-amber-300 bg-amber-50 px-2 py-1.5 text-xs text-amber-900">
-              Automatic reading is off on this server: no ANTHROPIC_API_KEY is set. Until an
-              administrator adds one, type the amounts, or use “Paste breakdown” below.
+              Automatic reading is off on this server: no GEMINI_API_KEY (free) or
+              ANTHROPIC_API_KEY is set. Until an administrator adds one, type the amounts, or
+              use “Paste breakdown” below.
             </p>
           )}
           <div className="mt-3 flex justify-center gap-2">

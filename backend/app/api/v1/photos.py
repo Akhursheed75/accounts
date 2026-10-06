@@ -50,7 +50,7 @@ def _read_into(db: Session, photo: SheetPhoto, data: bytes, on: date | None) -> 
         photo.extracted_at = datetime.now(UTC)
         return None
     photo.extraction = raw
-    photo.extraction_model = env.sheet_reader_model
+    photo.extraction_model = sheet_reader.model_name()
     photo.extraction_error = None
     photo.extracted_at = datetime.now(UTC)
     rate_day = on
@@ -66,7 +66,7 @@ def _read_into(db: Session, photo: SheetPhoto, data: bytes, on: date | None) -> 
 @router.get("/accounting/reader")
 def reader_status(user: User = Depends(require("accounting.read"))) -> dict:
     return {"available": sheet_reader.available(),
-            "model": env.sheet_reader_model if sheet_reader.available() else None}
+            "model": sheet_reader.model_name()}
 
 
 @router.post("/accounting/photos", status_code=201)
@@ -147,7 +147,7 @@ def reread_photo(
     photo = _get_photo(db, user, photo_id)
     if not sheet_reader.available():
         raise ValidationFailed(
-            "Reading photos is not set up on this server (no ANTHROPIC_API_KEY)."
+            "Reading photos is not set up on this server (no GEMINI_API_KEY or ANTHROPIC_API_KEY)."
         )
     data = get_storage().load(photo.stored_key)
     on = photo.daily_record.business_date if photo.daily_record else None
