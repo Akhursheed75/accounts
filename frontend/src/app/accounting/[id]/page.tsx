@@ -4,9 +4,9 @@ import { Lock, LockOpen, Trash2 } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
 import { useState } from "react";
 
-import { BalanceBreakdown, RecordForm } from "@/components/record-form";
+import { PaperSheet } from "@/components/paper-sheet";
 import { PageHeader } from "@/components/shell";
-import { Card, ErrorNote, Modal, Spinner, StatusBadge, useToast } from "@/components/ui";
+import { ErrorNote, Modal, Spinner, StatusBadge, useToast } from "@/components/ui";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { dateTime, money, shortDate } from "@/lib/format";
@@ -92,15 +92,7 @@ export default function RecordPage() {
         }
       />
 
-      <Card
-        className="mb-4"
-        title="Closing balance, step by step"
-        description="Exactly how the figure was reached, so it can be checked against the paper sheet."
-      >
-        <BalanceBreakdown balance={data.balance} />
-      </Card>
-
-      <RecordForm record={data} />
+      <PaperSheet key={data.updated_at} record={data} onSaved={reload} />
 
       <Modal
         open={confirmDelete}

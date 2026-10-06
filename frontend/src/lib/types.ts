@@ -39,8 +39,10 @@ export interface Bank {
 
 export interface Page<T> { items: T[]; total: number; page: number; page_size: number }
 
+export type TransferSource = "SHEET" | "FOUND" | "PICKED";
+
 export interface Transfer {
-  id: number; payment_method: PaymentMethod;
+  id: number; payment_method: PaymentMethod; source: TransferSource;
   bank_id: number | null; bank_code: string | null; bank_name: string | null;
   bank_account_id: number | null; currency_code: Currency; amount: string;
   reference: string | null; deposit_time: string | null; note: string;
@@ -88,6 +90,70 @@ export interface DailyRecord {
   transfer_totals: Record<string, string>; cash_totals: Record<string, string>;
   expense_totals: Record<string, string>;
   balance: Record<string, BalanceSide>;
+  commercial_invoice_cash_usd: string; commercial_invoice_deposit_usd: string;
+  delivery_cash_usd: string; delivery_transfer_usd: string;
+  declared_closing_usd: string | null;
+  bank_totals: BankTotal[];
+  bank_cells: BankCell[];
+  paper: PaperView;
+  photos: SheetPhoto[];
+}
+
+export interface BankTotal {
+  id: number; bank_id: number; bank_code: string | null; currency_code: Currency; amount: string;
+}
+
+export type CellStatus = "MATCHED" | "POSSIBLE" | "UNMATCHED" | "DIFFERENT" | "WAITING";
+
+export interface BankCellLine {
+  transfer_id: number; amount: string; source: TransferSource; status: string;
+  bank_date: string | null; bank_description: string | null;
+}
+
+export interface BankCell {
+  total_id: number | null; bank_id: number; bank_code: string | null; currency_code: Currency;
+  declared: string | null; listed_sum: string; matched_sum: string; remaining: string;
+  status: CellStatus; lines: BankCellLine[];
+}
+
+export interface PaperPair { usd: string; nio: string; total_usd: string | null }
+
+export interface PaperView {
+  rate: string | null; total_usd: string | null;
+  cash_received: PaperPair; transfers: PaperPair; expenses: PaperPair;
+  steps: { key: string; label: string; sign: number; amount_usd: string | null }[];
+  closing_computed_usd: string | null; closing_declared_usd: string | null;
+  closing_difference_usd: string | null;
+}
+
+export interface SheetPhoto {
+  id: number; original_filename: string; content_type: string; file_size: number;
+  created_at: string; extraction: Record<string, unknown> | null;
+  extraction_model: string | null; extraction_error: string | null;
+}
+
+/** What the photo reader made of a sheet: a draft payload for the form. */
+export interface SheetDraft {
+  business_date: string | null; shop_id: number | null; shop_name_read: string | null;
+  bale_count: number; invoice_count: number;
+  total_sales_usd: string; opening_balance_usd: string;
+  transfers: { payment_method: PaymentMethod; bank_id?: number; currency_code: Currency; amount: string }[];
+  bank_totals: { bank_id: number; currency_code: Currency; amount: string }[];
+  expenses: { category: string; description: string; currency_code: Currency; amount: string }[];
+  bale_records: { bale_type_id: number; opening_qty: number; received_qty: number; sold_qty: number; closing_qty: number }[];
+  commercial_invoice_cash_usd: string; commercial_invoice_deposit_usd: string;
+  delivery_cash_usd: string; delivery_transfer_usd: string;
+  credit_usd: string; observations: string; declared_closing_usd: string | null;
+}
+
+export interface PhotoUpload {
+  photo: SheetPhoto; reader_available: boolean;
+  draft: SheetDraft | null; checks: string[]; unclear: string[];
+}
+
+export interface CandidateLine {
+  id: number; txn_date: string; amount: string; description: string;
+  reference: string | null; selected: boolean;
 }
 
 export interface DailyRecordRow {
