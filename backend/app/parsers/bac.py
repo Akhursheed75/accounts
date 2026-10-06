@@ -21,7 +21,8 @@ ZERO = Decimal("0.00")
 ROW = re.compile(
     r"^(?P<date>\d{1,2}/\d{1,2}/\d{2,4})\s+"
     r"(?P<reference>[0-9OoIl]{4,20})\s+"
-    r"(?P<code>[A-Z]{2,4})\s+"
+    # Mostly letters (DP, TF, WD, DC) but BAC also prints codes like "3V".
+    r"(?P<code>(?=[A-Z0-9]*[A-Z])[A-Z0-9]{2,4})\s+"
     r"(?P<description>.*?)\s+"
     r"(?P<debit>[\d.,]+)\s+"
     r"(?P<credit>[\d.,]+)\s+"

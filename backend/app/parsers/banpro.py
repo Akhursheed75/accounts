@@ -16,6 +16,9 @@ from app.parsers.layout import (
 
 HEADERS = ["fechas", "descripción", "monto"]
 HEADERS_ALT = ["fecha", "descripcion", "monto"]
+# OCR mangles the accent ("Descripcién"); headers match by prefix, so the stem
+# is enough and still cannot be confused with anything else on the page.
+HEADERS_STEM = ["fecha", "descrip", "monto"]
 ZERO = Decimal("0.00")
 
 
@@ -25,21 +28,36 @@ class BanproParser(BaseParser):
 
     def can_parse(self, doc: PdfDocument) -> bool:
         text = doc.text.lower()
-        return "banpro" in text or ("transferencias" in text and "monto" in text)
+        if "banpro" in text or ("transferencias" in text and "monto" in text):
+            return True
+        # The same list sent through "Microsoft: Print To PDF" has no text layer.
+        if not doc.has_text_layer and doc.ocr_available():
+            try:
+                sample = doc.ocr_page(0).lower()
+            except Exception:
+                return False
+            return "banpro" in sample and "monto" in sample
+        return False
 
     def parse(self, doc: PdfDocument, *, currency_code: str) -> ParseResult:
-        if not doc.has_text_layer:
+        use_ocr = not doc.has_text_layer
+        if use_ocr and not doc.ocr_available():
             raise ParserError(
-                "This BANPRO file has no readable text. Print the movement list to PDF "
-                "from online banking instead of photographing the screen."
+                "This BANPRO file has no readable text and OCR is not installed on the "
+                "server. Print the movement list to PDF from the browser instead."
             )
-        result = ParseResult(extraction_method="TEXT")
+        result = ParseResult(extraction_method="OCR" if use_ocr else "TEXT")
         row_index = 0
         detected_currencies: set[str] = set()
 
         for page_no in range(doc.page_count):
-            rows = cluster_rows(doc.words(page_no))
-            found = find_header(rows, HEADERS) or find_header(rows, HEADERS_ALT)
+            words = doc.ocr_words(page_no) if use_ocr else doc.words(page_no)
+            rows = cluster_rows(words)
+            found = (
+                find_header(rows, HEADERS)
+                or find_header(rows, HEADERS_ALT)
+                or find_header(rows, HEADERS_STEM)
+            )
             if not found:
                 continue
             header_index, columns = found
