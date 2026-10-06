@@ -10,7 +10,7 @@
  * for the day has not been uploaded yet.
  */
 import {
-  AlertTriangle, Camera, Check, ImagePlus, Loader2, Maximize2, Plus, RefreshCw, ScanLine,
+  AlertTriangle, Camera, Check, ClipboardPaste, ImagePlus, Loader2, Maximize2, Plus, RefreshCw, ScanLine,
   Trash2, X, ZoomIn,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
@@ -22,6 +22,7 @@ import { api, request } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { money, today } from "@/lib/format";
 import { useApi } from "@/lib/hooks";
+import { parseBreakdown, type Breakdown } from "@/lib/breakdown";
 import type {
   BankCell, BaleType, Bank, CandidateLine, Currency, DailyRecord, PhotoUpload, SheetDraft,
   SheetPhoto, Shop,
@@ -435,6 +436,7 @@ export function PaperSheet({ record, onSaved }: { record?: DailyRecord; onSaved?
   }, [record?.bank_cells]);
 
   const hasPhoto = photos.length > 0;
+  const [pasting, setPasting] = useState(false);
 
   /* ============================================================== layout */
   return (
@@ -689,7 +691,14 @@ export function PaperSheet({ record, onSaved }: { record?: DailyRecord; onSaved?
         {/* ------------------------------------------------- bank details */}
         <Card
           title="Bank detail"
-          description="Each deposit the sheet lists. Type an amount and press Enter; each one turns green when it is found on the statement."
+          description="Each deposit the sheet lists. Type an amount and press Enter, or paste several at once; each one turns green when it is found on the statement."
+          actions={
+            !readOnly && (
+              <button type="button" className="btn-secondary btn-sm" onClick={() => setPasting(true)}>
+                <ClipboardPaste className="h-3.5 w-3.5" /> Paste breakdown
+              </button>
+            )
+          }
         >
           <div className="divide-y divide-ink-100">
             {bankList.flatMap((bank) =>
@@ -714,6 +723,37 @@ export function PaperSheet({ record, onSaved }: { record?: DailyRecord; onSaved?
             )}
           </div>
         </Card>
+
+        {pasting && (
+          <BreakdownModal
+            banks={bankList}
+            onClose={() => setPasting(false)}
+            onApply={(breakdown, keep) => {
+              setDetails((d) => {
+                const next = { ...d };
+                for (const e of breakdown.entries) {
+                  if (e.amounts.length === 0) continue;
+                  const key = cellKey(e.bankId, e.currency);
+                  const fresh = e.amounts.map((amount) => ({ key: newKey(), amount }));
+                  next[key] = keep ? [...(next[key] ?? []), ...fresh] : fresh;
+                }
+                return next;
+              });
+              setTotals((t) => {
+                const next = { ...t };
+                for (const e of breakdown.entries) {
+                  const key = cellKey(e.bankId, e.currency);
+                  const sum = e.amounts.reduce((s, a) => s + Number(a), 0) + (keep ? sumChips(details[key]) : 0);
+                  if (e.total) next[key] = e.total;
+                  else if (!next[key] && sum > 0) next[key] = sum.toFixed(2);
+                }
+                return next;
+              });
+              setPasting(false);
+              toast.push("ok", "Added. Check the amounts, then save to match them with the banks.");
+            }}
+          />
+        )}
 
         {/* ---------------------------------------------- credit, bales, balance */}
         <Card title="Credit / observations">
@@ -1023,7 +1063,7 @@ function DetailRow({
 
   function add(raw: string) {
     // "18000-19030" or "18000 19030" as on paper: several deposits at once.
-    const parts = raw.split(/[\s;/+]+|(?<=\d)-(?=\d)/).map((p) => cleanAmount(p)).filter((p) => num(p) > 0);
+    const parts = raw.split(/[\s;/+]+|,(?=\s)|(?<=\d)\s*-\s*(?=\d)/).map((p) => cleanAmount(p)).filter((p) => num(p) > 0);
     if (!parts.length) return;
     const next = [...chips, ...parts.map((amount) => ({ key: newKey(), amount }))];
     onChange(next);
@@ -1067,6 +1107,13 @@ function DetailRow({
             placeholder={chips.length ? "+ another" : "amount"}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
+            onPaste={(e) => {
+              const text = e.clipboardData.getData("text");
+              if (/\d[\s\S]*[\s,;+-][\s\S]*\d/.test(text.trim())) {
+                e.preventDefault();
+                add(text);
+              }
+            }}
             onKeyDown={(e) => {
               if (e.key === "Enter") {
                 e.preventDefault();
@@ -1218,6 +1265,18 @@ function PhotoDrop({
     [onFile, readerAvailable, hasPhoto],
   );
 
+  useEffect(() => {
+    function onPaste(event: ClipboardEvent) {
+      const item = Array.from(event.clipboardData?.items ?? []).find((i) => i.type.startsWith("image/"));
+      const file = item?.getAsFile();
+      if (!file || reading) return;
+      event.preventDefault();
+      onFile(new File([file], file.name || "pasted-sheet.png", { type: file.type }), readerAvailable && !hasPhoto);
+    }
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  }, [onFile, readerAvailable, hasPhoto, reading]);
+
   if (hasPhoto) {
     return (
       <div className="flex justify-end">
@@ -1246,9 +1305,15 @@ function PhotoDrop({
           <p className="mt-2 text-sm font-medium text-ink-900">Photo of the paper sheet</p>
           <p className="mt-0.5 text-xs text-ink-500">
             {readerAvailable
-              ? "Drop it here or choose it — the amounts are read into the form for you to check."
-              : "Drop it here or choose it — it is kept with the sheet and shown beside the form."}
+              ? "Drop it here, choose it, or paste it (Ctrl+V). The amounts are read into the form for you to check and edit."
+              : "Drop it here, choose it, or paste it (Ctrl+V). It is kept with the sheet and shown beside the form."}
           </p>
+          {!readerAvailable && (
+            <p className="mx-auto mt-2 max-w-md rounded border border-amber-300 bg-amber-50 px-2 py-1.5 text-xs text-amber-900">
+              Automatic reading is off on this server: no ANTHROPIC_API_KEY is set. Until an
+              administrator adds one, type the amounts, or use “Paste breakdown” below.
+            </p>
+          )}
           <div className="mt-3 flex justify-center gap-2">
             <button type="button" className="btn-primary btn-sm" onClick={() => fileInput.current?.click()}>
               <Camera className="h-3.5 w-3.5" /> {readerAvailable ? "Choose photo and read it" : "Choose photo"}
@@ -1325,5 +1390,72 @@ function PhotoPanel({
         </div>
       )}
     </aside>
+  );
+}
+
+/* ------------------------------------------------------- pasted breakdown */
+
+function BreakdownModal({
+  banks, onClose, onApply,
+}: {
+  banks: { id: number; code: string }[];
+  onClose: () => void;
+  onApply: (breakdown: Breakdown, keep: boolean) => void;
+}) {
+  const [text, setText] = useState("");
+  const [keep, setKeep] = useState(false);
+  const parsed = useMemo(() => parseBreakdown(text, banks), [text, banks]);
+  const count = parsed.entries.reduce((n, e) => n + e.amounts.length + (e.total ? 1 : 0), 0);
+
+  return (
+    <Modal open onClose={onClose} wide title="Paste the payment breakdown"
+      footer={
+        <>
+          <button type="button" className="btn-secondary btn-sm" onClick={onClose}>Cancel</button>
+          <label className="mr-auto flex items-center gap-2 self-center text-xs text-ink-600">
+            <input type="checkbox" checked={keep} onChange={(e) => setKeep(e.target.checked)} />
+            Keep the deposits already there and add these
+          </label>
+          <button type="button" className="btn-primary btn-sm" disabled={count === 0} onClick={() => onApply(parsed, keep)}>
+            Add {count || ""} to the sheet
+          </button>
+        </>
+      }>
+      <div className="grid gap-4 md:grid-cols-2">
+        <label className="block">
+          <span className="label">Paste here (from WhatsApp, Excel or a note)</span>
+          <textarea className="input h-64 font-mono text-sm" autoFocus value={text}
+            onChange={(e) => setText(e.target.value)}
+            placeholder={"BAC C$ 18000 - 19030\nBAC $ 10\nLAFISE C$ 7000\nBanpro $ 190, 235, 280, 1095\nLafise $ total 7066"} />
+          <span className="mt-1 block text-xs text-ink-500">
+            One bank per line. C$ / cordobas or $ / dolares sets the currency; a line without one keeps
+            the line above&apos;s. A line with &quot;total&quot; sets the bank total.
+          </span>
+        </label>
+        <div>
+          <span className="label">What will be added</span>
+          {parsed.entries.length === 0 ? (
+            <p className="text-sm text-ink-500">Nothing recognised yet.</p>
+          ) : (
+            <ul className="divide-y divide-ink-100 rounded-lg border border-ink-200">
+              {parsed.entries.map((e) => (
+                <li key={`${e.bankId}:${e.currency}`} className="px-3 py-2 text-sm">
+                  <p className="font-semibold">{e.bankCode} {e.currency === "USD" ? "$" : "C$"}</p>
+                  {e.amounts.length > 0 && (
+                    <p className="tabular text-ink-700">{e.amounts.map((a) => money(a, e.currency)).join(" · ")}</p>
+                  )}
+                  {e.total && <p className="tabular text-ink-700">Total {money(e.total, e.currency)}</p>}
+                </li>
+              ))}
+            </ul>
+          )}
+          {parsed.skipped.length > 0 && (
+            <p className="mt-2 rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs text-amber-800">
+              No bank named on: {parsed.skipped.join(" | ")}
+            </p>
+          )}
+        </div>
+      </div>
+    </Modal>
   );
 }
