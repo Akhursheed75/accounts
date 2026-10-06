@@ -13,9 +13,7 @@ from __future__ import annotations
 
 import base64
 import io
-import json
 import logging
-import re
 import unicodedata
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -44,22 +42,8 @@ class ReaderFailed(RuntimeError):
     pass
 
 
-def provider() -> str | None:
-    """Claude when its key is set, otherwise Gemini's free tier, otherwise none."""
-    if settings.anthropic_api_key:
-        return "anthropic"
-    if settings.gemini_api_key:
-        return "gemini"
-    return None
-
-
 def available() -> bool:
-    return provider() is not None
-
-
-def model_name() -> str | None:
-    return {"anthropic": settings.sheet_reader_model,
-            "gemini": settings.gemini_model}.get(provider() or "")
+    return bool(settings.anthropic_api_key)
 
 
 # ----------------------------------------------------------------- the image
@@ -195,11 +179,9 @@ and add the field name to "unclear"."""
 def _call_model(image: bytes, media_type: str) -> dict:
     if not available():
         raise ReaderUnavailable(
-            "Reading photos is not set up on this server (no GEMINI_API_KEY or "
-            "ANTHROPIC_API_KEY). The photo is kept with the sheet; type the amounts beside it."
+            "Reading photos is not set up on this server (no ANTHROPIC_API_KEY). The "
+            "photo is kept with the sheet; type the amounts beside it."
         )
-    if provider() == "gemini":
-        return _call_gemini(image, media_type)
     body = {
         "model": settings.sheet_reader_model,
         "max_tokens": 4000,
@@ -246,79 +228,6 @@ def _call_model(image: bytes, media_type: str) -> dict:
         if block.get("type") == "tool_use" and block.get("name") == "record_sheet":
             return block.get("input") or {}
     raise ReaderFailed("The reading service did not return the sheet's values.")
-
-
-GEMINI_PROMPT = PROMPT.replace(
-    "Copy what is written into the record_sheet tool.",
-    "Copy what is written into JSON that follows the schema at the end.",
-) + "\n\nAnswer with JSON only, following this JSON schema:\n" + json.dumps(SHEET_SCHEMA)
-
-
-def _json_from_text(text: str) -> dict:
-    text = text.strip()
-    fenced = re.search(r"```(?:json)?\s*(.*?)```", text, re.S)
-    if fenced:
-        text = fenced.group(1)
-    start, end = text.find("{"), text.rfind("}")
-    if start < 0 or end < start:
-        raise ReaderFailed("The reading service did not return the sheet's values.")
-    try:
-        value = json.loads(text[start:end + 1])
-    except ValueError as exc:
-        raise ReaderFailed("The reading service returned something that is not the sheet's values.") from exc
-    if not isinstance(value, dict):
-        raise ReaderFailed("The reading service did not return the sheet's values.")
-    for key in ("transfers", "deposit_details", "expenses", "bales", "unclear"):
-        if not isinstance(value.get(key), list):
-            value[key] = []
-    return value
-
-
-def _call_gemini(image: bytes, media_type: str) -> dict:
-    body = {
-        "contents": [{
-            "role": "user",
-            "parts": [
-                {"inline_data": {"mime_type": media_type, "data": base64.b64encode(image).decode()}},
-                {"text": GEMINI_PROMPT},
-            ],
-        }],
-        "generationConfig": {"temperature": 0, "responseMimeType": "application/json"},
-    }
-    url = (f"{settings.gemini_base_url.rstrip('/')}/v1beta/models/"
-           f"{settings.gemini_model}:generateContent")
-    try:
-        response = httpx.post(
-            url, json=body,
-            headers={"x-goog-api-key": settings.gemini_api_key or "",
-                     "content-type": "application/json"},
-            timeout=settings.sheet_reader_timeout,
-        )
-    except httpx.HTTPError as exc:
-        raise ReaderFailed(f"Could not reach the reading service: {exc.__class__.__name__}.") from exc
-    if response.status_code != 200:
-        detail = ""
-        try:
-            detail = response.json().get("error", {}).get("message", "")
-        except Exception:  # noqa: BLE001
-            pass
-        log.warning("gemini sheet reader returned %s: %s", response.status_code, detail)
-        if response.status_code == 429:
-            raise ReaderFailed("The free reading limit was reached for now. Try again in a "
-                               "minute, or type the amounts.")
-        raise ReaderFailed(
-            f"The reading service answered {response.status_code}"
-            + (f": {detail[:200]}" if detail else ".")
-        )
-    payload = response.json()
-    candidates = payload.get("candidates") or []
-    parts = (candidates[0].get("content") or {}).get("parts") if candidates else None
-    text = "".join(p.get("text", "") for p in parts or [])
-    if not text:
-        reason = (candidates[0].get("finishReason") if candidates
-                  else (payload.get("promptFeedback") or {}).get("blockReason"))
-        raise ReaderFailed(f"The reading service returned no values ({reason or 'empty answer'}).")
-    return _json_from_text(text)
 
 
 def read(data: bytes) -> dict:

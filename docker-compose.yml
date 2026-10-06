@@ -40,8 +40,6 @@ services:
       OCR_LANGUAGES: ${OCR_LANGUAGES:-spa+eng}
       # Optional. Reads photos of the handwritten daily sheet into the form.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-flash-latest}
       SHEET_READER_MODEL: ${SHEET_READER_MODEL:-claude-sonnet-5-5}
       DEFAULT_DATE_WINDOW_DAYS: ${DEFAULT_DATE_WINDOW_DAYS:-3}
       # Read once, by `python -m app.seed`, to create the first administrator.
