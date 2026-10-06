@@ -145,15 +145,16 @@ def test_jinotegas_sheet_becomes_a_draft_that_agrees_with_itself(
     assert sold == {45: 7, 4: 0}
     assert draft["declared_closing_usd"] == "0.00"
 
-    # The person checks it and saves: the photo stays with the sheet.
+    # The person checks it and saves: the photo was only a reference, so it is deleted.
     payload = {**{k: v for k, v in draft.items() if k != "shop_name_read"},
                "status": "SUBMITTED", "photo_ids": [body["photo"]["id"]]}
     saved = client.post("/api/v1/accounting/daily", json=payload, headers=admin_headers)
     assert saved.status_code == 201, saved.text
     record = saved.json()
-    assert [p["id"] for p in record["photos"]] == [body["photo"]["id"]]
-    assert record["photos"][0]["extraction"]["shop"] == "Jinotega"
+    assert record["photos"] == []
     assert record["paper"]["total_usd"] == "1509.00"
+    gone = client.get(f"/api/v1/accounting/photos/{body['photo']['id']}/file", headers=admin_headers)
+    assert gone.status_code == 404
 
 
 def test_sheet_disagreements_are_reported_for_a_second_look(client, admin_headers, monkeypatch):

@@ -11,12 +11,12 @@
  */
 import {
   AlertTriangle, Camera, Check, ClipboardPaste, ImagePlus, Loader2, Maximize2, Plus, RefreshCw, ScanLine,
-  Trash2, X, ZoomIn,
+  X, ZoomIn,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { Card, ErrorNote, Modal, StatusBadge, useToast } from "./ui";
+import { ErrorNote, Modal, StatusBadge, useToast } from "./ui";
 import { cleanAmount } from "./record-form";
 import { api, request } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
@@ -48,17 +48,6 @@ function toUsd(usd: number, nio: number, rate: number | null): number | null {
 function usd(value: number | null) {
   return value === null ? "—" : money(value, "USD");
 }
-
-/** Status colour for a whole cell or a single chip. */
-const TONE: Record<string, string> = {
-  MATCHED: "border-emerald-500 bg-emerald-50 text-emerald-800",
-  POSSIBLE: "border-amber-500 bg-amber-50 text-amber-900",
-  UNMATCHED: "border-red-500 bg-red-50 text-red-800",
-  DIFFERENT: "border-red-500 bg-red-50 text-red-800",
-  PENDING_DEPOSIT: "border-sky-500 bg-sky-50 text-sky-800",
-  WAITING: "border-ink-300 bg-ink-50 text-ink-600",
-  NEW: "border-ink-300 bg-surface text-ink-800",
-};
 
 const CELL_WORDS: Record<string, string> = {
   MATCHED: "On the statement",
@@ -438,9 +427,82 @@ export function PaperSheet({ record, onSaved }: { record?: DailyRecord; onSaved?
   const hasPhoto = photos.length > 0;
   const [pasting, setPasting] = useState(false);
 
+  /* ------------------------------------------- green while typing */
+  const live = useLiveMatch({
+    date, recordId: record?.id, details, totals, enabled: Boolean(banks.data),
+  });
+
+  /** Colour of one deposit: saved deposits use the bank match the server made,
+   *  anything typed since is checked live against the uploaded statements. */
+  const chipTone = (chip: Chip): { tone: string; note: string } => {
+    if (chip.id && chip.status) {
+      return { tone: chip.status, note: CELL_WORDS[chip.status] ?? chip.status.replace(/_/g, " ").toLowerCase() };
+    }
+    const l = live.details[chip.key];
+    if (!l) return { tone: "NEW", note: "Checking…" };
+    return { tone: LIVE_TONE[l.status], note: LIVE_WORDS[l.status] + (l.description ? ` · ${l.description}` : "") };
+  };
+
+  const cellTone = (bankId: number, code: Currency): { tone: string | null; note: string } => {
+    const key = cellKey(bankId, code);
+    const value = totals[key] ?? "";
+    const chips = details[key] ?? [];
+    const saved = cells[key];
+    const savedTotal = record?.bank_totals.find((t) => cellKey(t.bank_id, t.currency_code) === key)?.amount ?? "";
+    const savedChips = record?.transfers.filter(
+      (t) => t.source === "SHEET" && t.payment_method === "BANK" && t.bank_id !== null && cellKey(t.bank_id, t.currency_code) === key,
+    ) ?? [];
+    const dirty = value !== savedTotal || chips.some((c) => !c.id) || chips.length !== savedChips.length;
+    if (!value && !chips.length) return { tone: null, note: "" };
+    if (saved && !dirty) return { tone: saved.status, note: CELL_WORDS[saved.status] ?? saved.status };
+    if (chips.length) {
+      const listed = sumChips(chips);
+      if (value && Math.abs(listed - num(value)) >= 0.005) {
+        return { tone: "DIFFERENT", note: `Detail adds to ${money(listed, code)}` };
+      }
+      const tones = chips.map((c) => chipTone(c).tone);
+      if (tones.every((t) => t === "MATCHED")) return { tone: "MATCHED", note: "On the statement" };
+      if (tones.some((t) => t === "NEW")) return { tone: "NEW", note: "Checking…" };
+      if (tones.every((t) => t === "WAITING")) return { tone: "WAITING", note: LIVE_WORDS.NO_STATEMENT };
+      if (tones.some((t) => t === "UNMATCHED")) return { tone: "UNMATCHED", note: "Some deposits not on the statement" };
+      return { tone: "POSSIBLE", note: "Confirm the match after saving" };
+    }
+    const l = live.totals[key];
+    if (!l) return { tone: "NEW", note: "Checking…" };
+    return { tone: LIVE_TONE[l.status], note: LIVE_TOTAL_WORDS[l.status] };
+  };
+
+  const addDeposits = (key: string, raw: string) => {
+    const parts = splitAmounts(raw);
+    if (!parts.length) return;
+    setDetails((d) => {
+      const next = [...(d[key] ?? []), ...parts.map((amount) => ({ key: newKey(), amount }))];
+      setTotals((t) => (t[key] ? t : { ...t, [key]: sumChips(next).toFixed(2) }));
+      return { ...d, [key]: next };
+    });
+  };
+  const removeDeposit = (key: string, chipKey: string) =>
+    setDetails((d) => ({ ...d, [key]: (d[key] ?? []).filter((c) => c.key !== chipKey) }));
+
+  // Paper order: BAC, LAFISE, BANPRO, FICHOSA, then anything else.
+  const ORDER = ["BAC", "LAFISE", "BANPRO", "FICHOSA", "FICOHSA"];
+  const paperBanks = [...bankList].sort(
+    (a, b) => (ORDER.indexOf(a.code) + 1 || 99) - (ORDER.indexOf(b.code) + 1 || 99),
+  );
+  const detailBanks = paperBanks.filter(
+    (b) => !["FICHOSA", "FICOHSA"].includes(b.code)
+      || (details[cellKey(b.id, "USD")]?.length || details[cellKey(b.id, "NIO")]?.length),
+  );
+  const ficohsa = paperBanks.find((b) => ["FICHOSA", "FICOHSA"].includes(b.code));
+  const [showFicohsaDetail, setShowFicohsaDetail] = useState(false);
+
+  const soldTotal = baleRows.reduce(
+    (s, b) => s + Math.max((Number(b.opening) || 0) + (Number(b.received) || 0) - (Number(b.closing) || 0), 0), 0,
+  );
+
   /* ============================================================== layout */
   return (
-    <div className={hasPhoto ? "grid gap-4 xl:grid-cols-[minmax(0,5fr)_minmax(0,7fr)]" : ""}>
+    <div className={hasPhoto ? "grid gap-4 xl:grid-cols-[minmax(0,4fr)_minmax(0,7fr)]" : ""}>
       {hasPhoto && (
         <PhotoPanel
           photos={photos}
@@ -450,7 +512,7 @@ export function PaperSheet({ record, onSaved }: { record?: DailyRecord; onSaved?
         />
       )}
 
-      <form onSubmit={save} className="min-w-0 space-y-4 pb-24">
+      <form onSubmit={save} className="min-w-0 space-y-3 pb-24">
         <ErrorNote error={error} />
 
         {!readOnly && (
@@ -462,16 +524,10 @@ export function PaperSheet({ record, onSaved }: { record?: DailyRecord; onSaved?
           />
         )}
 
-        {fromPhoto && (
-          <div className="rounded-lg border border-sky-300 bg-sky-50 px-3 py-2 text-sm text-sky-900">
-            <p className="flex items-center gap-2 font-medium">
-              <ScanLine className="h-4 w-4" /> Filled from the photo — check every line against it before saving.
-            </p>
-            {checks.length > 0 && (
-              <ul className="mt-1.5 list-disc space-y-0.5 pl-6 text-xs text-amber-800">
-                {checks.map((c) => <li key={c}>{c}</li>)}
-              </ul>
-            )}
+        {fromPhoto && checks.length > 0 && (
+          <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+            <p className="flex items-center gap-2 font-medium"><AlertTriangle className="h-4 w-4" /> Worth a second look</p>
+            <ul className="mt-1 list-disc pl-6 text-xs">{checks.map((c) => <li key={c}>{c}</li>)}</ul>
           </div>
         )}
 
@@ -481,248 +537,241 @@ export function PaperSheet({ record, onSaved }: { record?: DailyRecord; onSaved?
           </div>
         )}
 
-        {/* ---------------------------------------------------- header */}
-        <Card padded={false}>
-          <div className="grid gap-3 border-b border-ink-200 p-4 sm:grid-cols-3">
-            <label className="block">
-              <span className="label">Date</span>
-              <input type="date" className="input" value={date} max={today()}
-                disabled={editing || readOnly} onChange={(e) => setDate(e.target.value)} required />
-            </label>
-            <label className="block">
-              <span className="label">Closing cash — shop</span>
-              <select className="input" value={shopId} disabled={editing || readOnly}
-                onChange={(e) => setShopId(e.target.value)} required>
-                <option value="">Choose the shop…</option>
-                {(shops.data ?? []).map((s) => (
-                  <option key={s.id} value={s.id}>{s.name}{s.city_name ? ` — ${s.city_name}` : ""}</option>
-                ))}
-              </select>
-            </label>
-            <label className="block">
-              <span className="label">Status</span>
-              <select className="input" value={status} disabled={readOnly} onChange={(e) => setStatus(e.target.value)}>
-                <option value="SUBMITTED">Submitted — check against the banks</option>
-                <option value="DRAFT">Draft — still being entered</option>
-              </select>
-            </label>
+        {/* toolbar: things the paper does not have */}
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <Legend />
+          <div className="flex flex-wrap items-center gap-2">
+            <select className="input w-auto py-1 text-xs" value={status} disabled={readOnly}
+              onChange={(e) => setStatus(e.target.value)} aria-label="Status">
+              <option value="SUBMITTED">Submitted</option>
+              <option value="DRAFT">Draft</option>
+            </select>
+            {record && can("reconciliation.match") && <RecheckButton recordId={record.id} onDone={onSaved} />}
           </div>
-          <div className="grid grid-cols-2 divide-ink-200 sm:grid-cols-5 sm:divide-x">
-            <Box label="Quantity of bales">
-              <PlainInput value={bales} onChange={setBales} disabled={readOnly} integer />
-            </Box>
-            <Box label="Total sales $">
-              <PlainInput value={sales} onChange={setSales} disabled={readOnly} prefix="$" />
-            </Box>
-            <Box label="Other balances $">
-              <PlainInput value={other} onChange={setOther} disabled={readOnly} prefix="$" />
-            </Box>
-            <Box label="Total" tone="computed">
-              <p className="tabular py-2 text-lg font-semibold">{money(headerTotal, "USD")}</p>
-            </Box>
-            <Box label="Invoices">
-              <PlainInput value={invoices} onChange={setInvoices} disabled={readOnly} integer />
-            </Box>
-          </div>
-        </Card>
+        </div>
 
-        {/* ------------------------------------------ cash & commercial invoice */}
-        <Card padded={false}>
-          <SheetTable
-            head={["", "C$", "$", "TOTAL$"]}
-            rows={[
-              {
-                label: "Cash received",
-                cells: [
-                  <PlainInput key="n" value={cashNio} onChange={setCashNio} disabled={readOnly} prefix="C$" />,
-                  <PlainInput key="u" value={cashUsd} onChange={setCashUsd} disabled={readOnly} prefix="$" />,
-                  <Computed key="t" value={cashTotal} />,
-                ],
-                after: (num(cashNio) > 0 || num(cashUsd) > 0) && record ? (
-                  <CashStatus record={record} />
-                ) : null,
-              },
-            ]}
-          />
-          <SheetTable
-            head={["", "Cash", "Deposit", "TOTAL$"]}
-            rows={[
-              {
-                label: "Commercial invoice",
-                cells: [
-                  <PlainInput key="c" value={ciCash} onChange={setCiCash} disabled={readOnly} prefix="$" />,
-                  <PlainInput key="d" value={ciDeposit} onChange={setCiDeposit} disabled={readOnly} prefix="$" />,
-                  <Computed key="t" value={num(ciCash) + num(ciDeposit)} />,
-                ],
-              },
-            ]}
-          />
-        </Card>
+        {/* ============================== the paper ============================== */}
+        <div className="paper-sheet overflow-x-auto rounded-sm bg-white text-neutral-900 shadow-md ring-1 ring-neutral-300">
+          <div className="min-w-[720px] px-5 pb-6 pt-5">
+            {/* date + CLOSING CASH <shop> */}
+            <div className="mb-3 flex items-end justify-between gap-4">
+              <input type="date" className="paper-input w-44 border-b-2 border-neutral-800 text-lg font-semibold"
+                value={date} max={today()} disabled={editing || readOnly}
+                onChange={(e) => setDate(e.target.value)} required aria-label="Date" />
+              <div className="flex items-end gap-3">
+                <span className="pb-1 text-sm font-bold tracking-wide">CLOSING CASH</span>
+                <select className="paper-input w-56 border-b-2 border-neutral-800 text-xl font-semibold"
+                  value={shopId} disabled={editing || readOnly} onChange={(e) => setShopId(e.target.value)}
+                  required aria-label="Shop">
+                  <option value="">choose the shop…</option>
+                  {(shops.data ?? []).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>
+              </div>
+            </div>
 
-        {/* ---------------------------------------------------- transfers */}
-        <Card
-          padded={false}
-          title="Transfers"
-          description="The bank totals as written on the sheet. Each turns green when the statement shows it."
-          actions={
-            record && can("reconciliation.match") ? (
-              <RecheckButton recordId={record.id} onDone={onSaved} />
-            ) : null
-          }
-        >
-          <div className="table-scroll">
-            <table className="w-full min-w-[560px] text-sm">
-              <thead className="border-b border-ink-200 bg-ink-50">
-                <tr>
-                  <th className="th w-28">Bank</th>
-                  <th className="th">$</th>
-                  <th className="th">C$</th>
-                  <th className="th text-right">TOTAL$</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-ink-100">
-                {bankList.map((bank) => {
-                  const u = cellKey(bank.id, "USD");
-                  const n = cellKey(bank.id, "NIO");
-                  const rowUsd = totals[u] ? num(totals[u]) : sumChips(details[u]);
-                  const rowNio = totals[n] ? num(totals[n]) : sumChips(details[n]);
-                  return (
-                    <tr key={bank.id}>
-                      <td className="td font-semibold">{bank.code}</td>
-                      {(["USD", "NIO"] as const).map((code) => {
-                        const key = cellKey(bank.id, code);
-                        return (
-                          <td key={code} className="td align-top">
-                            <TotalCell
-                              value={totals[key] ?? ""}
-                              onChange={(v) => setTotals((t) => ({ ...t, [key]: v }))}
-                              currency={code}
-                              cell={cells[key]}
-                              dirty={(totals[key] ?? "") !== (record?.bank_totals.find((t) => cellKey(t.bank_id, t.currency_code) === key)?.amount ?? "")}
-                              disabled={readOnly}
-                              recordId={record?.id}
-                              onPicked={onSaved}
-                            />
-                          </td>
-                        );
-                      })}
-                      <td className="td tabular text-right align-top font-medium">
-                        {rowUsd || rowNio ? usd(toUsd(rowUsd, rowNio, nioPerUsd)) : <span className="text-ink-300">–</span>}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-              <tfoot className="border-t-2 border-ink-300 bg-ink-50">
-                <tr>
-                  <td className="td font-semibold">Total</td>
-                  <td className="td tabular">{money(transferUsd.usd, "USD")}</td>
-                  <td className="td tabular">{money(transferUsd.nio, "NIO")}</td>
-                  <td className="td tabular text-right font-semibold">{usd(transferUsd.total)}</td>
-                </tr>
-              </tfoot>
-            </table>
-          </div>
-          {!nioPerUsd && (
-            <p className="border-t border-ink-200 px-4 py-2 text-xs text-amber-700">
-              No exchange rate for this month yet, so C$ amounts are not converted into TOTAL$.
-              An administrator sets it in Monthly records.
-            </p>
-          )}
-        </Card>
+            <div className="grid grid-cols-[1.35fr_1fr_1fr_0.75fr_0.75fr] border-l border-t border-neutral-800 text-[13px]">
+              {/* header boxes */}
+              <P head>QUANTITY OF BALES</P><P head center>TOTAL SALES $</P><P head center>OTHER BALANCES $</P>
+              <P head center>TOTAL</P><P head center>INVOICES</P>
+              <P><Num label="Quantity of bales" value={bales} onChange={setBales} disabled={readOnly} integer center /></P>
+              <P><Num label="Total sales $" value={sales} onChange={setSales} disabled={readOnly} center /></P>
+              <P><Num label="Other balances $" value={other} onChange={setOther} disabled={readOnly} center /></P>
+              <P center><span className="tabular text-base font-semibold">{headerTotal ? fmt(headerTotal) : ""}</span></P>
+              <P><Num label="Invoices" value={invoices} onChange={setInvoices} disabled={readOnly} integer center /></P>
+              <Bar />
 
-        {/* ----------------------------------------------------- expenses */}
-        <Card
-          title="Total expenses"
-          actions={
-            !readOnly && (
-              <button type="button" className="btn-secondary btn-sm"
-                onClick={() => setExpenses((r) => [...r, { key: newKey(), description: "", currency_code: "NIO", amount: "" }])}>
-                <Plus className="h-3.5 w-3.5" /> Add expense
-              </button>
-            )
-          }
-        >
-          {expenses.length === 0 ? (
-            <p className="text-sm text-ink-500">No expenses.</p>
-          ) : (
-            <div className="space-y-2">
-              {expenses.map((e) => (
-                <div key={e.key} className="flex flex-wrap items-center gap-2">
-                  <input className="input min-w-[8rem] flex-1" placeholder="What for (e.g. Bonos, bus)"
-                    value={e.description} disabled={readOnly}
-                    onChange={(ev) => setExpenses((r) => r.map((x) => (x.key === e.key ? { ...x, description: ev.target.value } : x)))} />
-                  <CurrencySwitch value={e.currency_code} disabled={readOnly}
-                    onChange={(c) => setExpenses((r) => r.map((x) => (x.key === e.key ? { ...x, currency_code: c } : x)))} />
-                  <div className="w-36">
-                    <PlainInput value={e.amount} disabled={readOnly} prefix={e.currency_code === "USD" ? "$" : "C$"}
-                      onChange={(v) => setExpenses((r) => r.map((x) => (x.key === e.key ? { ...x, amount: v } : x)))} />
-                  </div>
-                  {!readOnly && (
-                    <button type="button" className="btn-ghost btn-sm text-red-600" aria-label="Remove expense"
-                      onClick={() => setExpenses((r) => r.filter((x) => x.key !== e.key))}>
-                      <Trash2 className="h-4 w-4" />
+              {/* cash received */}
+              <P /><P /><P /><P head center>TOTAL$</P><P />
+              <P className="row-span-2 !items-center justify-center border-2 border-neutral-800 font-medium">CASH RECEIVED</P>
+              <P className="col-span-2"><span className="w-7 text-xs font-semibold">C$</span><Num label="Cash received C$" value={cashNio} onChange={setCashNio} disabled={readOnly} /></P>
+              <P className="row-span-2" center><span className="tabular font-semibold">{num(cashNio) || num(cashUsd) ? usd(cashTotal) : ""}</span></P>
+              <P className="row-span-2">{record && (num(cashNio) > 0 || num(cashUsd) > 0) && <CashStatus record={record} />}</P>
+              <P className="col-span-2"><span className="w-7 text-xs font-semibold">$</span><Num label="Cash received $" value={cashUsd} onChange={setCashUsd} disabled={readOnly} /></P>
+
+              {/* commercial invoice */}
+              <P head>COMERCIAL INVOICE</P><P head center>CASH</P><P head center>DEPOSIT</P><P head center>TOTAL$</P><P />
+              <P /><P><Num value={ciCash} onChange={setCiCash} disabled={readOnly} center /></P>
+              <P><Num value={ciDeposit} onChange={setCiDeposit} disabled={readOnly} center /></P>
+              <P center><span className="tabular font-semibold">{num(ciCash) + num(ciDeposit) ? fmt(num(ciCash) + num(ciDeposit)) : ""}</span></P><P />
+
+              {/* transfers */}
+              <P head>TRANSFERS</P><P head center>$</P><P head center>C$</P><P head center>TOTAL$</P><P />
+              {paperBanks.map((bank) => {
+                const u = cellKey(bank.id, "USD");
+                const n = cellKey(bank.id, "NIO");
+                const rowUsd = totals[u] ? num(totals[u]) : sumChips(details[u]);
+                const rowNio = totals[n] ? num(totals[n]) : sumChips(details[n]);
+                const pickable = (["USD", "NIO"] as const).map((code) => {
+                  const c = cells[cellKey(bank.id, code)];
+                  return c && c.total_id && c.status !== "MATCHED" && c.status !== "WAITING"
+                    && c.lines.every((l) => l.source !== "SHEET") && totals[cellKey(bank.id, code)] === record?.bank_totals.find((t) => t.id === c.total_id)?.amount
+                    ? { code, cell: c } : null;
+                }).filter(Boolean) as { code: Currency; cell: BankCell }[];
+                return (
+                  <Fragment key={bank.id}>
+                    <P className="font-medium">{bank.code === "FICOHSA" ? "FICHOSA" : bank.code}</P>
+                    {(["USD", "NIO"] as const).map((code) => {
+                      const key = cellKey(bank.id, code);
+                      const { tone, note } = cellTone(bank.id, code);
+                      return (
+                        <P key={code} tone={tone} title={note}>
+                          <Num label={`${bank.code} ${code === "USD" ? "$" : "C$"}`} value={totals[key] ?? ""} center disabled={readOnly}
+                            onChange={(v) => setTotals((t) => ({ ...t, [key]: v }))} />
+                          {tone === "MATCHED" && <Check className="h-4 w-4 shrink-0 text-emerald-700" />}
+                        </P>
+                      );
+                    })}
+                    <P center><span className="tabular">{rowUsd || rowNio ? usd(toUsd(rowUsd, rowNio, nioPerUsd)) : ""}</span></P>
+                    <P className="text-[11px]">
+                      {pickable.map(({ code, cell }) => (
+                        <PickButton key={code} recordId={record!.id} cell={cell} currency={code} onDone={onSaved} />
+                      ))}
+                    </P>
+                  </Fragment>
+                );
+              })}
+
+              {/* expenses */}
+              <P className="font-medium">TOTAL EXPENSES</P>
+              <P className="col-span-2 !block py-1">
+                <ExpenseLine expenses={expenses} setExpenses={setExpenses} disabled={readOnly} />
+              </P>
+              <P center><span className="tabular font-semibold">{expenses.length ? usd(expenseTotal) : ""}</span></P><P />
+
+              {/* delivery */}
+              <P /><P head center>CASH</P><P head center>TRANSFERS</P><P /><P />
+              <P className="font-medium">DELIVERY</P>
+              <P><Num value={delCash} onChange={setDelCash} disabled={readOnly} center /></P>
+              <P><Num value={delTransfer} onChange={setDelTransfer} disabled={readOnly} center /></P>
+              <P /><P />
+              <Bar>
+                {!readOnly && (
+                  <button type="button" onClick={() => setPasting(true)}
+                    className="ml-auto inline-flex items-center gap-1 rounded bg-white/90 px-2 py-0.5 text-[11px] font-semibold text-neutral-900 hover:bg-white">
+                    <ClipboardPaste className="h-3 w-3" /> Paste payment breakdown
+                  </button>
+                )}
+              </Bar>
+
+              {/* detail rows */}
+              {detailBanks.map((bank, i) => (
+                <Fragment key={bank.id}>
+                  {i > 0 && <Spacer />}
+                  {(["USD", "NIO"] as const).map((code) => {
+                    const key = cellKey(bank.id, code);
+                    const name = bank.code === "FICOHSA" ? "FICHOSA" : bank.code;
+                    const label = bank.code === "BANPRO" || bank.code === "FICHOSA" || bank.code === "FICOHSA"
+                      ? `${name} ${code === "USD" ? "$" : "C$"}`
+                      : `${name} DETAIL ${code === "USD" ? "$" : "C$"}`;
+                    const fromStatement = (cells[key]?.lines ?? []).filter((l) => l.source !== "SHEET");
+                    return (
+                      <Fragment key={code}>
+                        <P className="font-medium">{label}</P>
+                        <P className="col-span-4 !flex-wrap gap-1 py-1">
+                          <DepositChips
+                            chips={details[key] ?? []} currency={code} disabled={readOnly}
+                            tone={chipTone} fromStatement={fromStatement}
+                            total={totals[key]}
+                            onAdd={(raw) => addDeposits(key, raw)}
+                            onRemove={(chipKey) => removeDeposit(key, chipKey)}
+                          />
+                        </P>
+                      </Fragment>
+                    );
+                  })}
+                </Fragment>
+              ))}
+              {ficohsa && !detailBanks.includes(ficohsa) && !readOnly && (
+                <P className="col-span-5 !py-0.5">
+                  {showFicohsaDetail ? null : (
+                    <button type="button" className="text-[11px] font-medium text-neutral-500 hover:text-neutral-900"
+                      onClick={() => { setShowFicohsaDetail(true); addDeposits(cellKey(ficohsa.id, "NIO"), ""); }}>
+                      + FICHOSA detail
                     </button>
                   )}
-                </div>
-              ))}
-            </div>
-          )}
-          <div className="mt-3 flex justify-between border-t border-ink-200 pt-2 text-sm">
-            <span className="text-ink-500">Total expenses</span>
-            <span className="tabular font-semibold">{usd(expenseTotal)}</span>
-          </div>
-        </Card>
-
-        {/* ----------------------------------------------------- delivery */}
-        <Card padded={false}>
-          <SheetTable
-            head={["", "Cash", "Transfers"]}
-            rows={[{
-              label: "Delivery",
-              cells: [
-                <PlainInput key="c" value={delCash} onChange={setDelCash} disabled={readOnly} prefix="$" />,
-                <PlainInput key="t" value={delTransfer} onChange={setDelTransfer} disabled={readOnly} prefix="$" />,
-              ],
-            }]}
-          />
-        </Card>
-
-        {/* ------------------------------------------------- bank details */}
-        <Card
-          title="Bank detail"
-          description="Each deposit the sheet lists. Type an amount and press Enter, or paste several at once; each one turns green when it is found on the statement."
-          actions={
-            !readOnly && (
-              <button type="button" className="btn-secondary btn-sm" onClick={() => setPasting(true)}>
-                <ClipboardPaste className="h-3.5 w-3.5" /> Paste breakdown
-              </button>
-            )
-          }
-        >
-          <div className="divide-y divide-ink-100">
-            {bankList.flatMap((bank) =>
-              (["USD", "NIO"] as const).map((code) => {
-                const key = cellKey(bank.id, code);
-                const cell = cells[key];
-                const fromStatement = (cell?.lines ?? []).filter((l) => l.source !== "SHEET");
+                </P>
+              )}
+              {ficohsa && showFicohsaDetail && !detailBanks.includes(ficohsa) && (["USD", "NIO"] as const).map((code) => {
+                const key = cellKey(ficohsa.id, code);
                 return (
-                  <DetailRow
-                    key={key}
-                    label={`${bank.code} detail ${code === "USD" ? "$" : "C$"}`}
-                    currency={code}
-                    chips={details[key] ?? []}
-                    fromStatement={fromStatement}
-                    total={totals[key]}
-                    disabled={readOnly}
-                    onChange={(chips) => setDetails((d) => ({ ...d, [key]: chips }))}
-                    onFillTotal={(sum) => setTotals((t) => (t[key] ? t : { ...t, [key]: String(sum) }))}
-                  />
+                  <Fragment key={code}>
+                    <P className="font-medium">FICHOSA {code === "USD" ? "$" : "C$"}</P>
+                    <P className="col-span-4 !flex-wrap gap-1 py-1">
+                      <DepositChips chips={details[key] ?? []} currency={code} disabled={readOnly} tone={chipTone}
+                        fromStatement={[]} total={totals[key]}
+                        onAdd={(raw) => addDeposits(key, raw)} onRemove={(chipKey) => removeDeposit(key, chipKey)} />
+                    </P>
+                  </Fragment>
                 );
-              }),
+              })}
+              <Spacer />
+
+              {/* credit / observations */}
+              <P className="justify-center font-bold">CREDIT</P>
+              <P><Num value={credit} onChange={setCredit} disabled={readOnly} prefix="$" /></P>
+              <P className="col-span-3" />
+              <P className="justify-center font-bold">OBSERVATIONS</P>
+              <P className="col-span-4">
+                <input className="paper-input w-full" value={observations} disabled={readOnly}
+                  onChange={(e) => setObservations(e.target.value)} aria-label="Observations" />
+              </P>
+              <Spacer />
+
+              {/* bales */}
+              <P />
+              {baleRows.map((b) => <P key={b.key} head center>{b.name}</P>)}
+              {Array.from({ length: Math.max(4 - baleRows.length, 0) }).map((_, i) => <P key={i} />)}
+              {([
+                ["opening", "BALES QUANTITY"],
+                ["received", "+ RECEIVED"],
+                ["closing", "AFTER CLOSING"],
+              ] as const).map(([field, label]) => (
+                <Fragment key={field}>
+                  <P className={field === "received" ? "text-neutral-500" : "font-medium"}>{label}</P>
+                  {baleRows.map((b) => (
+                    <P key={b.key}>
+                      <Num value={b[field]} integer center disabled={readOnly}
+                        onChange={(v) => setBaleRows((r) => r.map((x) => (x.key === b.key ? { ...x, [field]: v } : x)))} />
+                    </P>
+                  ))}
+                  {Array.from({ length: Math.max(4 - baleRows.length, 0) }).map((_, i) => <P key={i} />)}
+                </Fragment>
+              ))}
+              <P className="text-neutral-500">sold</P>
+              {baleRows.map((b) => (
+                <P key={b.key} center className="text-neutral-500">
+                  <span className="tabular">{Math.max((Number(b.opening) || 0) + (Number(b.received) || 0) - (Number(b.closing) || 0), 0)}</span>
+                </P>
+              ))}
+              <P className="col-span-2 text-[11px] text-amber-700">
+                {bales && baleRows.some((b) => b.opening) && soldTotal !== Number(bales)
+                  ? `Sold adds to ${soldTotal}, quantity of bales says ${bales}` : ""}
+              </P>
+              <Spacer />
+
+              {/* balances */}
+              <P className="font-medium">STARTING BALANCE</P>
+              <P><span className="tabular px-1 text-base">{other ? fmt(num(other)) : ""}</span></P>
+              <P className="col-span-3" />
+              <P className="font-medium">CLOSING BALANCE</P>
+              <P><Num label="Closing balance" value={closing} onChange={setClosing} disabled={readOnly} /></P>
+              <P className="col-span-3 text-xs text-neutral-600">
+                calculated {usd(computedClosing)}
+                {computedClosing !== null && closing.trim() !== "" && Math.abs(num(closing) - computedClosing) >= 1 && (
+                  <span className="ml-2 font-semibold text-amber-700">
+                    differs by {money(num(closing) - computedClosing, "USD")}
+                  </span>
+                )}
+              </P>
+            </div>
+            {!nioPerUsd && (
+              <p className="mt-2 text-xs text-amber-700">
+                No exchange rate for this month yet, so C$ amounts are not converted into TOTAL$.
+                An administrator sets it in Monthly records.
+              </p>
             )}
           </div>
-        </Card>
+        </div>
 
         {pasting && (
           <BreakdownModal
@@ -737,114 +786,39 @@ export function PaperSheet({ record, onSaved }: { record?: DailyRecord; onSaved?
                   const fresh = e.amounts.map((amount) => ({ key: newKey(), amount }));
                   next[key] = keep ? [...(next[key] ?? []), ...fresh] : fresh;
                 }
-                return next;
-              });
-              setTotals((t) => {
-                const next = { ...t };
-                for (const e of breakdown.entries) {
-                  const key = cellKey(e.bankId, e.currency);
-                  const sum = e.amounts.reduce((s, a) => s + Number(a), 0) + (keep ? sumChips(details[key]) : 0);
-                  if (e.total) next[key] = e.total;
-                  else if (!next[key] && sum > 0) next[key] = sum.toFixed(2);
-                }
+                setTotals((t) => {
+                  const out = { ...t };
+                  for (const e of breakdown.entries) {
+                    const key = cellKey(e.bankId, e.currency);
+                    if (e.total) out[key] = e.total;
+                    else if (e.amounts.length) {
+                      const before = sumChips(d[key]);
+                      const was = num(t[key]);
+                      // A total that simply added up the deposits keeps adding them up.
+                      if (!t[key] || (keep && Math.abs(was - before) < 0.005) || !keep) {
+                        out[key] = sumChips(next[key]).toFixed(2);
+                      }
+                    }
+                  }
+                  return out;
+                });
                 return next;
               });
               setPasting(false);
-              toast.push("ok", "Added. Check the amounts, then save to match them with the banks.");
+              toast.push("ok", "Added. Each payment turns green when the uploaded statements show it.");
             }}
           />
         )}
-
-        {/* ---------------------------------------------- credit, bales, balance */}
-        <Card title="Credit / observations">
-          <div className="grid gap-3 sm:grid-cols-[10rem_1fr]">
-            <label className="block">
-              <span className="label">Credit $</span>
-              <PlainInput value={credit} onChange={setCredit} disabled={readOnly} prefix="$" />
-            </label>
-            <label className="block">
-              <span className="label">Observations</span>
-              <textarea className="input min-h-[60px]" value={observations} disabled={readOnly}
-                onChange={(e) => setObservations(e.target.value)}
-                placeholder="e.g. $1,615 28/09/26 used on invoice #174805" />
-            </label>
-          </div>
-        </Card>
-
-        <Card padded={false}>
-          <div className="table-scroll">
-            <table className="w-full min-w-[480px] text-sm">
-              <thead className="border-b border-ink-200 bg-ink-50">
-                <tr>
-                  <th className="th"></th>
-                  {baleRows.map((b) => <th key={b.key} className="th text-center">{b.name}</th>)}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-ink-100">
-                {([
-                  ["opening", "Bales quantity"],
-                  ["received", "+ received"],
-                  ["closing", "After closing"],
-                ] as const).map(([field, label]) => (
-                  <tr key={field}>
-                    <td className="td font-medium">{label}</td>
-                    {baleRows.map((b) => (
-                      <td key={b.key} className="td">
-                        <input className="input tabular mx-auto w-24 text-center" inputMode="numeric"
-                          value={b[field]} disabled={readOnly}
-                          onChange={(e) => setBaleRows((r) => r.map((x) => (x.key === b.key ? { ...x, [field]: e.target.value.replace(/[^0-9]/g, "") } : x)))} />
-                      </td>
-                    ))}
-                  </tr>
-                ))}
-                <tr className="bg-ink-50">
-                  <td className="td text-ink-500">Sold</td>
-                  {baleRows.map((b) => (
-                    <td key={b.key} className="td tabular text-center font-semibold">
-                      {Math.max((Number(b.opening) || 0) + (Number(b.received) || 0) - (Number(b.closing) || 0), 0)}
-                    </td>
-                  ))}
-                </tr>
-              </tbody>
-            </table>
-          </div>
-          {(() => {
-            const sold = baleRows.reduce((s, b) => s + Math.max((Number(b.opening) || 0) + (Number(b.received) || 0) - (Number(b.closing) || 0), 0), 0);
-            return bales && sold !== Number(bales) && baleRows.some((b) => b.opening) ? (
-              <p className="border-t border-ink-200 px-4 py-2 text-xs text-amber-700">
-                Bales sold here add up to {sold}, but Quantity of bales says {bales}.
-              </p>
-            ) : null;
-          })()}
-        </Card>
-
-        <Card padded={false}>
-          <div className="grid divide-y divide-ink-200 sm:grid-cols-3 sm:divide-x sm:divide-y-0">
-            <Box label="Starting balance $" tone="computed">
-              <p className="tabular py-2 font-semibold">{money(num(other), "USD")}</p>
-            </Box>
-            <Box label="Closing balance $ (as written)">
-              <PlainInput value={closing} onChange={setClosing} disabled={readOnly} prefix="$" />
-            </Box>
-            <Box label="Closing balance $ (calculated)" tone="computed">
-              <p className="tabular py-2 font-semibold">{usd(computedClosing)}</p>
-              {computedClosing !== null && closing.trim() !== "" && Math.abs(num(closing) - computedClosing) >= 1 && (
-                <p className="text-xs text-amber-700">
-                  Differs from the sheet by {money(num(closing) - computedClosing, "USD")}
-                </p>
-              )}
-            </Box>
-          </div>
-          <p className="border-t border-ink-200 px-4 py-2 text-xs text-ink-500">
-            Total − cash received − transfers − expenses, with C$ at the month&apos;s rate
-            {nioPerUsd ? ` (C$${nioPerUsd} per $1)` : ""}. The saved sheet shows the calculation step by step.
-          </p>
-        </Card>
 
         <div className="fixed inset-x-0 bottom-0 z-20 border-t border-ink-200 bg-surface/95 px-4 py-3 backdrop-blur lg:pl-64">
           <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3">
             <div className="text-xs text-ink-500">
               Transfers {usd(transferUsd.total)} · Expenses {usd(expenseTotal)} · Closing {usd(computedClosing)}
+              {live.counts.total > 0 && (
+                <span className="ml-2 font-medium text-emerald-700">
+                  · {live.counts.found} of {live.counts.total} new payments on the statements
+                </span>
+              )}
             </div>
             <div className="flex gap-2">
               <button type="button" className="btn-secondary btn-sm" onClick={() => router.back()}>Cancel</button>
@@ -875,95 +849,353 @@ function zeroBlank(value: string | null | undefined) {
   return value && Number(value) !== 0 ? value : "";
 }
 
-function Box({ label, children, tone }: { label: string; children: React.ReactNode; tone?: "computed" }) {
+/** Plain number as written on paper: 1,509 or 1,008.11 */
+function fmt(value: number) {
+  return value.toLocaleString("en-US", { maximumFractionDigits: 2 });
+}
+
+/** "18000-19030", "18000 19030", "18,000, 19,030" or one per line: each is a deposit. */
+function splitAmounts(raw: string): string[] {
+  return raw
+    .split(/[\s;/+]+|,(?=\s)|(?<=\d)\s*-\s*(?=\d)/)
+    .map((p) => cleanAmount(p))
+    .filter((p) => num(p) > 0);
+}
+
+/* live statuses from /accounting/daily/preview-match */
+type LiveStatus = "FOUND" | "SEVERAL" | "TAKEN" | "NOT_FOUND" | "NO_STATEMENT" | "AMBIGUOUS" | "LISTED";
+
+const LIVE_TONE: Record<LiveStatus, string> = {
+  FOUND: "MATCHED",
+  SEVERAL: "POSSIBLE",
+  AMBIGUOUS: "POSSIBLE",
+  TAKEN: "UNMATCHED",
+  NOT_FOUND: "UNMATCHED",
+  NO_STATEMENT: "WAITING",
+  LISTED: "NEW",
+};
+
+const LIVE_WORDS: Record<LiveStatus, string> = {
+  FOUND: "On the statement",
+  SEVERAL: "On the statement more than once: confirm which after saving",
+  AMBIGUOUS: "",
+  TAKEN: "Already matched to another shop's sheet",
+  NOT_FOUND: "Not on the statement",
+  NO_STATEMENT: "That bank's statement is not uploaded yet",
+  LISTED: "",
+};
+
+const LIVE_TOTAL_WORDS: Record<LiveStatus, string> = {
+  FOUND: "The statement's lines add up to it",
+  SEVERAL: "",
+  AMBIGUOUS: "Several sets of lines add up to it: choose them after saving",
+  TAKEN: "",
+  NOT_FOUND: "No set of the day's lines adds up to it",
+  NO_STATEMENT: "That bank's statement is not uploaded yet",
+  LISTED: "",
+};
+
+interface LiveResult {
+  details: Record<string, { status: LiveStatus; description: string | null }>;
+  totals: Record<string, { status: LiveStatus }>;
+  counts: { found: number; total: number };
+}
+
+function useLiveMatch({
+  date, recordId, details, totals, enabled,
+}: {
+  date: string;
+  recordId?: number;
+  details: Record<string, Chip[]>;
+  totals: Record<string, string>;
+  enabled: boolean;
+}): LiveResult {
+  const [result, setResult] = useState<LiveResult>({ details: {}, totals: {}, counts: { found: 0, total: 0 } });
+  const signature = JSON.stringify([
+    date, recordId,
+    Object.entries(details).map(([k, chips]) => [k, chips.filter((c) => !c.id).map((c) => [c.key, c.amount])]),
+    Object.entries(totals),
+  ]);
+
+  useEffect(() => {
+    if (!enabled || !date) return;
+    const fresh: { key: string; bank_id: number; currency_code: string; amount: string }[] = [];
+    for (const [cell, chips] of Object.entries(details)) {
+      const [bankId, code] = cell.split(":");
+      for (const chip of chips) {
+        if (chip.id || !(num(chip.amount) > 0)) continue;
+        fresh.push({ key: chip.key, bank_id: Number(bankId), currency_code: code, amount: cleanAmount(chip.amount) });
+      }
+    }
+    const totalCells = Object.entries(totals)
+      .filter(([, v]) => num(v) > 0)
+      .map(([cell, v]) => {
+        const [bankId, code] = cell.split(":");
+        return { key: cell, bank_id: Number(bankId), currency_code: code, amount: cleanAmount(v) };
+      });
+    // Saved deposits are part of the day too: send them so new ones never take their lines.
+    const savedChips: { bank_id: number; currency_code: string; amount: string }[] = [];
+    for (const [cell, chips] of Object.entries(details)) {
+      const [bankId, code] = cell.split(":");
+      for (const chip of chips) if (chip.id) savedChips.push({ bank_id: Number(bankId), currency_code: code, amount: cleanAmount(chip.amount) });
+    }
+    if (!fresh.length && !totalCells.length) {
+      setResult({ details: {}, totals: {}, counts: { found: 0, total: 0 } });
+      return;
+    }
+    const timer = setTimeout(async () => {
+      try {
+        const answer = await api.post<{
+          details: { status: LiveStatus; description: string | null }[];
+          totals: { status: LiveStatus }[];
+        }>("/accounting/daily/preview-match", {
+          business_date: date,
+          record_id: recordId ?? null,
+          details: [...savedChips, ...fresh.map(({ bank_id, currency_code, amount }) => ({ bank_id, currency_code, amount }))],
+          totals: totalCells.map(({ bank_id, currency_code, amount }) => ({ bank_id, currency_code, amount })),
+        });
+        const d: LiveResult["details"] = {};
+        fresh.forEach((f, i) => { d[f.key] = answer.details[savedChips.length + i]; });
+        const t: LiveResult["totals"] = {};
+        totalCells.forEach((c, i) => { t[c.key] = answer.totals[i]; });
+        setResult({
+          details: d, totals: t,
+          counts: { found: fresh.filter((f) => d[f.key]?.status === "FOUND").length, total: fresh.length },
+        });
+      } catch {
+        /* a failed check just leaves the colours as they were */
+      }
+    }, 500);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [signature, enabled]);
+
+  return result;
+}
+
+/** One cell of the paper grid. */
+function P({
+  children, head, center, className = "", tone, title,
+}: {
+  children?: React.ReactNode;
+  head?: boolean;
+  center?: boolean;
+  className?: string;
+  tone?: string | null;
+  title?: string;
+}) {
   return (
-    <div className={`px-4 py-3 ${tone === "computed" ? "bg-ink-50" : ""}`}>
-      <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-ink-500">{label}</p>
+    <div
+      title={title}
+      className={`flex min-h-[2.1rem] items-center border-b border-r border-neutral-800 px-1.5 ${
+        head ? "text-[12px] font-semibold uppercase" : ""} ${center ? "justify-center text-center" : ""} ${
+        tone ? PAPER_TONE[tone] ?? "" : ""} ${className}`}
+    >
       {children}
     </div>
   );
 }
 
-function PlainInput({
-  value, onChange, disabled, prefix, integer,
+const PAPER_TONE: Record<string, string> = {
+  MATCHED: "bg-emerald-100 ring-2 ring-inset ring-emerald-500",
+  POSSIBLE: "bg-amber-100 ring-2 ring-inset ring-amber-500",
+  UNMATCHED: "bg-red-100 ring-2 ring-inset ring-red-500",
+  DIFFERENT: "bg-red-100 ring-2 ring-inset ring-red-500",
+  WAITING: "bg-neutral-100",
+  NEW: "",
+};
+
+function Bar({ children }: { children?: React.ReactNode }) {
+  return (
+    <div className="col-span-5 flex min-h-[1rem] items-center border-b border-r border-neutral-800 bg-neutral-800 px-2 py-0.5">
+      {children}
+    </div>
+  );
+}
+
+function Spacer() {
+  return <div className="col-span-5 h-4 border-b border-r border-neutral-800" />;
+}
+
+function Num({
+  value, onChange, disabled, integer, center, prefix, label,
 }: {
+  label?: string;
   value: string;
   onChange: (v: string) => void;
   disabled?: boolean;
-  prefix?: string;
   integer?: boolean;
+  center?: boolean;
+  prefix?: string;
 }) {
   return (
-    <div className="relative">
-      {prefix && (
-        <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-xs text-ink-400">
-          {prefix}
-        </span>
-      )}
+    <span className="flex w-full items-center">
+      {prefix && <span className="text-xs text-neutral-500">{prefix}</span>}
       <input
-        className={`input tabular ${prefix ? (prefix.length > 1 ? "pl-8" : "pl-6") : ""}`}
+        aria-label={label}
+        className={`paper-input tabular w-full text-base ${center ? "text-center" : ""}`}
         inputMode={integer ? "numeric" : "decimal"}
         value={value}
         disabled={disabled}
-        placeholder="0"
         onChange={(e) => onChange(integer ? e.target.value.replace(/[^0-9]/g, "") : e.target.value)}
         onBlur={(e) => !integer && e.target.value && onChange(cleanAmount(e.target.value))}
       />
-    </div>
+    </span>
   );
 }
 
-function Computed({ value }: { value: number | null }) {
-  return <p className="tabular py-2 text-right font-medium">{value ? usd(value) : <span className="text-ink-300">–</span>}</p>;
-}
-
-function SheetTable({
-  head, rows,
-}: {
-  head: string[];
-  rows: { label: string; cells: React.ReactNode[]; after?: React.ReactNode }[];
-}) {
+function Legend() {
+  const items: [string, string][] = [
+    ["bg-emerald-100 ring-emerald-500", "on the statement"],
+    ["bg-amber-100 ring-amber-500", "confirm"],
+    ["bg-red-100 ring-red-500", "not found"],
+    ["bg-neutral-100 ring-neutral-300", "statement not uploaded"],
+  ];
   return (
-    <div className="table-scroll border-b border-ink-200 last:border-b-0">
-      <table className="w-full min-w-[480px] text-sm">
-        <thead className="bg-ink-50">
-          <tr>{head.map((h, i) => <th key={i} className={`th ${i === head.length - 1 && h.includes("TOTAL") ? "text-right" : ""}`}>{h}</th>)}</tr>
-        </thead>
-        <tbody>
-          {rows.map((row) => (
-            <tr key={row.label}>
-              <td className="td w-44 font-semibold">
-                {row.label}
-                {row.after && <div className="mt-1">{row.after}</div>}
-              </td>
-              {row.cells.map((c, i) => <td key={i} className="td">{c}</td>)}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function CurrencySwitch({
-  value, onChange, disabled,
-}: {
-  value: Currency;
-  onChange: (c: Currency) => void;
-  disabled?: boolean;
-}) {
-  return (
-    <div className="inline-flex overflow-hidden rounded-md border border-ink-300" role="radiogroup" aria-label="Currency">
-      {(["USD", "NIO"] as const).map((code) => (
-        <button key={code} type="button" role="radio" aria-checked={value === code} disabled={disabled}
-          onClick={() => onChange(code)}
-          className={`px-2.5 py-1.5 text-xs font-semibold ${value === code ? "bg-ink-800 text-white" : "bg-surface text-ink-600 hover:bg-ink-100"}`}>
-          {code === "USD" ? "$" : "C$"}
-        </button>
+    <div className="flex flex-wrap items-center gap-3 text-[11px] text-ink-500">
+      {items.map(([c, label]) => (
+        <span key={label} className="inline-flex items-center gap-1">
+          <span className={`inline-block h-3 w-3 rounded-sm ring-2 ring-inset ${c}`} /> {label}
+        </span>
       ))}
     </div>
   );
 }
+
+/** TOTAL EXPENSES: written as on paper, "Kike 10,388 – Lenin 1,113 – Offload 100". */
+function ExpenseLine({
+  expenses, setExpenses, disabled,
+}: {
+  expenses: ExpenseRow[];
+  setExpenses: React.Dispatch<React.SetStateAction<ExpenseRow[]>>;
+  disabled?: boolean;
+}) {
+  const update = (key: string, patch: Partial<ExpenseRow>) =>
+    setExpenses((r) => r.map((x) => (x.key === key ? { ...x, ...patch } : x)));
+  return (
+    <div className="flex flex-wrap items-end gap-x-2 gap-y-1">
+      {expenses.map((e) => (
+        <span key={e.key} className="inline-flex flex-col rounded border border-neutral-300 px-1">
+          <input className="paper-input w-24 text-[11px] text-neutral-600" placeholder="for…" value={e.description}
+            disabled={disabled} onChange={(ev) => update(e.key, { description: ev.target.value })} />
+          <span className="flex items-center gap-0.5">
+            <button type="button" disabled={disabled} title="Switch $ / C$"
+              className="rounded px-0.5 text-[11px] font-semibold text-neutral-500 hover:bg-neutral-100"
+              onClick={() => update(e.key, { currency_code: e.currency_code === "USD" ? "NIO" : "USD" })}>
+              {e.currency_code === "USD" ? "$" : "C$"}
+            </button>
+            <input className="paper-input tabular w-20 text-sm" inputMode="decimal" value={e.amount} disabled={disabled}
+              onChange={(ev) => update(e.key, { amount: ev.target.value })}
+              onBlur={(ev) => ev.target.value && update(e.key, { amount: cleanAmount(ev.target.value) })} />
+            {!disabled && (
+              <button type="button" aria-label="Remove expense" className="text-neutral-400 hover:text-red-600"
+                onClick={() => setExpenses((r) => r.filter((x) => x.key !== e.key))}>
+                <X className="h-3 w-3" />
+              </button>
+            )}
+          </span>
+        </span>
+      ))}
+      {!disabled && (
+        <button type="button" className="mb-0.5 inline-flex items-center gap-0.5 text-[11px] font-medium text-neutral-500 hover:text-neutral-900"
+          onClick={() => setExpenses((r) => [...r, { key: newKey(), description: "", currency_code: "NIO", amount: "" }])}>
+          <Plus className="h-3 w-3" /> expense
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** A DETAIL row: each deposit a chip, coloured green as soon as the statement shows it. */
+function DepositChips({
+  chips, currency, disabled, tone, fromStatement, total, onAdd, onRemove,
+}: {
+  chips: Chip[];
+  currency: Currency;
+  disabled?: boolean;
+  tone: (chip: Chip) => { tone: string; note: string };
+  fromStatement: { transfer_id: number; amount: string; status: string; bank_description: string | null }[];
+  total?: string;
+  onAdd: (raw: string) => void;
+  onRemove: (chipKey: string) => void;
+}) {
+  const [draft, setDraft] = useState("");
+  const sum = sumChips(chips) + fromStatement.reduce((s, l) => s + num(l.amount), 0);
+  const mismatch = chips.length > 0 && num(total) > 0 && Math.abs(sumChips(chips) - num(total)) >= 0.005;
+  return (
+    <>
+      {chips.map((chip) => {
+        const t = tone(chip);
+        return (
+          <span key={chip.key} title={t.note}
+            className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-sm tabular ${CHIP_TONE[t.tone] ?? CHIP_TONE.NEW}`}>
+            {t.tone === "MATCHED" && <Check className="h-3.5 w-3.5" />}
+            {fmt(num(chip.amount))}
+            {!disabled && (
+              <button type="button" aria-label="Remove payment" className="opacity-50 hover:opacity-100"
+                onClick={() => onRemove(chip.key)}>
+                <X className="h-3 w-3" />
+              </button>
+            )}
+          </span>
+        );
+      })}
+      {fromStatement.map((line) => (
+        <span key={line.transfer_id} title={`From the statement: ${line.bank_description ?? ""}`}
+          className={`inline-flex items-center gap-1 rounded border border-dashed px-1.5 py-0.5 text-sm tabular ${CHIP_TONE[line.status] ?? CHIP_TONE.NEW}`}>
+          <Check className="h-3.5 w-3.5" /> {fmt(num(line.amount))}
+        </span>
+      ))}
+      {!disabled && (
+        <input
+          aria-label="Add payments"
+          className="paper-input tabular w-40 border-b border-dashed border-neutral-400 text-sm"
+          inputMode="decimal"
+          placeholder={chips.length ? "+ more (paste a list)" : "type or paste amounts"}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onPaste={(e) => {
+            const text = e.clipboardData.getData("text");
+            if (text.trim()) {
+              e.preventDefault();
+              onAdd(text);
+              setDraft("");
+            }
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              onAdd(draft);
+              setDraft("");
+            }
+          }}
+          onBlur={() => {
+            if (draft) {
+              onAdd(draft);
+              setDraft("");
+            }
+          }}
+        />
+      )}
+      {(chips.length > 0 || fromStatement.length > 0) && (
+        <span className={`ml-auto text-xs tabular ${mismatch ? "font-semibold text-red-700" : "text-neutral-500"}`}>
+          = {money(sum, currency)}
+          {mismatch && ` (TRANSFERS says ${money(num(total), currency)})`}
+        </span>
+      )}
+    </>
+  );
+}
+
+const CHIP_TONE: Record<string, string> = {
+  MATCHED: "border-emerald-600 bg-emerald-100 text-emerald-900",
+  POSSIBLE: "border-amber-500 bg-amber-100 text-amber-900",
+  UNMATCHED: "border-red-500 bg-red-100 text-red-800",
+  DIFFERENT: "border-red-500 bg-red-100 text-red-800",
+  PENDING_DEPOSIT: "border-sky-500 bg-sky-50 text-sky-800",
+  WAITING: "border-neutral-300 bg-neutral-100 text-neutral-600",
+  NEW: "border-neutral-400 bg-white text-neutral-900",
+};
 
 function CashStatus({ record }: { record: DailyRecord }) {
   const cash = record.transfers.filter((t) => t.payment_method === "CASH");
@@ -975,162 +1207,26 @@ function CashStatus({ record }: { record: DailyRecord }) {
   );
 }
 
-/** One $ or C$ cell of the TRANSFERS table, coloured by what the bank shows. */
-function TotalCell({
-  value, onChange, currency, cell, dirty, disabled, recordId, onPicked,
+/** For a bank total with no listed deposits that the day's lines can't settle on their own. */
+function PickButton({
+  recordId, cell, currency, onDone,
 }: {
-  value: string;
-  onChange: (v: string) => void;
+  recordId: number;
+  cell: BankCell;
   currency: Currency;
-  cell?: BankCell;
-  dirty: boolean;
-  disabled?: boolean;
-  recordId?: number;
-  onPicked?: () => void;
+  onDone?: () => void;
 }) {
-  const [picking, setPicking] = useState(false);
-  const status = !value && !cell ? null : dirty || !cell ? "NEW" : cell.status;
-  const canPick = Boolean(
-    recordId && cell?.total_id && !dirty && cell.status !== "MATCHED" && cell.status !== "WAITING"
-      && cell.lines.every((l) => l.source !== "SHEET"),
-  );
+  const [open, setOpen] = useState(false);
   return (
-    <div>
-      <div className={`relative rounded-lg border-2 ${status ? TONE[status] : "border-transparent"}`}>
-        <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-xs opacity-60">
-          {currency === "USD" ? "$" : "C$"}
-        </span>
-        <input
-          className="input tabular border-0 bg-transparent pl-8 shadow-none focus:ring-0"
-          inputMode="decimal"
-          value={value}
-          disabled={disabled}
-          placeholder="0"
-          onChange={(e) => onChange(e.target.value)}
-          onBlur={(e) => e.target.value && onChange(cleanAmount(e.target.value))}
-        />
-        {status === "MATCHED" && (
-          <Check className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-emerald-600" />
-        )}
-      </div>
-      {status && status !== "NEW" && (
-        <p className="mt-1 text-[11px] leading-tight">
-          <span className="font-medium">{CELL_WORDS[status] ?? status}</span>
-          {cell && cell.status === "POSSIBLE" && (
-            <span className="text-ink-500"> · more than one bank line fits —{" "}
-              <a href="/reconciliation" className="font-medium text-brand-700 hover:underline">confirm it</a>
-            </span>
-          )}
-          {cell && !["MATCHED", "POSSIBLE", "WAITING"].includes(cell.status) && Number(cell.remaining) > 0 && (
-            <span className="text-ink-500"> · {money(cell.remaining, currency)} not found</span>
-          )}
-          {cell && cell.status === "DIFFERENT" && (
-            <span className="text-ink-500"> · detail adds to {money(cell.listed_sum, currency)}</span>
-          )}
-        </p>
-      )}
-      {status === "NEW" && value && <p className="mt-1 text-[11px] text-ink-500">Checked when saved</p>}
-      {canPick && (
-        <button type="button" className="mt-1 text-[11px] font-medium text-brand-700 hover:underline"
-          onClick={() => setPicking(true)}>
-          Choose the bank lines…
-        </button>
-      )}
-      {picking && cell?.total_id && recordId && (
+    <>
+      <button type="button" className="block font-medium text-blue-700 hover:underline" onClick={() => setOpen(true)}>
+        choose lines {currency === "USD" ? "$" : "C$"}
+      </button>
+      {open && cell.total_id && (
         <PickLinesModal recordId={recordId} totalId={cell.total_id} currency={currency}
-          onClose={() => setPicking(false)} onDone={() => { setPicking(false); onPicked?.(); }} />
+          onClose={() => setOpen(false)} onDone={() => { setOpen(false); onDone?.(); }} />
       )}
-    </div>
-  );
-}
-
-/** A DETAIL row: the deposits as chips, each coloured by its own match. */
-function DetailRow({
-  label, currency, chips, fromStatement, total, disabled, onChange, onFillTotal,
-}: {
-  label: string;
-  currency: Currency;
-  chips: Chip[];
-  fromStatement: { transfer_id: number; amount: string; source: string; status: string; bank_description: string | null }[];
-  total?: string;
-  disabled?: boolean;
-  onChange: (chips: Chip[]) => void;
-  onFillTotal: (sum: number) => void;
-}) {
-  const [draft, setDraft] = useState("");
-  const input = useRef<HTMLInputElement>(null);
-  const sum = sumChips(chips);
-
-  function add(raw: string) {
-    // "18000-19030" or "18000 19030" as on paper: several deposits at once.
-    const parts = raw.split(/[\s;/+]+|,(?=\s)|(?<=\d)\s*-\s*(?=\d)/).map((p) => cleanAmount(p)).filter((p) => num(p) > 0);
-    if (!parts.length) return;
-    const next = [...chips, ...parts.map((amount) => ({ key: newKey(), amount }))];
-    onChange(next);
-    setDraft("");
-    onFillTotal(sumChips(next));
-  }
-
-  const totalNum = num(total);
-  const mismatch = chips.length > 0 && totalNum > 0 && Math.abs(sum - totalNum) >= 0.005;
-
-  return (
-    <div className="flex flex-wrap items-center gap-2 py-2">
-      <span className="w-32 shrink-0 text-xs font-semibold uppercase tracking-wide text-ink-500">{label}</span>
-      <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
-        {chips.map((chip) => (
-          <span key={chip.key}
-            title={chip.status ? CELL_WORDS[chip.status] ?? chip.status.replace(/_/g, " ").toLowerCase() : "Checked when saved"}
-            className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-sm tabular ${TONE[chip.status ?? "NEW"] ?? TONE.NEW}`}>
-            {chip.status === "MATCHED" && <Check className="h-3.5 w-3.5" />}
-            {money(chip.amount, currency)}
-            {!disabled && (
-              <button type="button" aria-label="Remove deposit" className="opacity-60 hover:opacity-100"
-                onClick={() => onChange(chips.filter((c) => c.key !== chip.key))}>
-                <X className="h-3 w-3" />
-              </button>
-            )}
-          </span>
-        ))}
-        {fromStatement.map((line) => (
-          <span key={line.transfer_id} title={`From the statement: ${line.bank_description ?? ""}`}
-            className={`inline-flex items-center gap-1 rounded-md border border-dashed px-2 py-0.5 text-sm tabular ${TONE[line.status] ?? TONE.NEW}`}>
-            <Check className="h-3.5 w-3.5" />
-            {money(line.amount, currency)}
-          </span>
-        ))}
-        {!disabled && (
-          <input
-            ref={input}
-            className="input w-32 py-1 text-sm tabular"
-            inputMode="decimal"
-            placeholder={chips.length ? "+ another" : "amount"}
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onPaste={(e) => {
-              const text = e.clipboardData.getData("text");
-              if (/\d[\s\S]*[\s,;+-][\s\S]*\d/.test(text.trim())) {
-                e.preventDefault();
-                add(text);
-              }
-            }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                add(draft);
-              }
-            }}
-            onBlur={() => draft && add(draft)}
-          />
-        )}
-      </div>
-      {(chips.length > 0 || fromStatement.length > 0) && (
-        <span className={`text-xs tabular ${mismatch ? "font-semibold text-red-700" : "text-ink-500"}`}>
-          = {money(sum + fromStatement.reduce((s, l) => s + num(l.amount), 0), currency)}
-          {mismatch && ` (total ${money(totalNum, currency)})`}
-        </span>
-      )}
-    </div>
+    </>
   );
 }
 
@@ -1305,15 +1401,10 @@ function PhotoDrop({
           <p className="mt-2 text-sm font-medium text-ink-900">Photo of the paper sheet</p>
           <p className="mt-0.5 text-xs text-ink-500">
             {readerAvailable
-              ? "Drop it here, choose it, or paste it (Ctrl+V). The amounts are read into the form for you to check and edit."
-              : "Drop it here, choose it, or paste it (Ctrl+V). It is kept with the sheet and shown beside the form."}
+              ? "Drop it here, choose it, or paste it (Ctrl+V). The amounts are read into the sheet for you to check."
+              : "Drop it here, choose it, or paste it (Ctrl+V). It stays beside the sheet while you type it in."}
+            {" "}It is deleted when you save.
           </p>
-          {!readerAvailable && (
-            <p className="mx-auto mt-2 max-w-md rounded border border-amber-300 bg-amber-50 px-2 py-1.5 text-xs text-amber-900">
-              Automatic reading is off on this server: no ANTHROPIC_API_KEY is set. Until an
-              administrator adds one, type the amounts, or use “Paste breakdown” below.
-            </p>
-          )}
           <div className="mt-3 flex justify-center gap-2">
             <button type="button" className="btn-primary btn-sm" onClick={() => fileInput.current?.click()}>
               <Camera className="h-3.5 w-3.5" /> {readerAvailable ? "Choose photo and read it" : "Choose photo"}
@@ -1403,7 +1494,7 @@ function BreakdownModal({
   onApply: (breakdown: Breakdown, keep: boolean) => void;
 }) {
   const [text, setText] = useState("");
-  const [keep, setKeep] = useState(false);
+  const [keep, setKeep] = useState(true);
   const parsed = useMemo(() => parseBreakdown(text, banks), [text, banks]);
   const count = parsed.entries.reduce((n, e) => n + e.amounts.length + (e.total ? 1 : 0), 0);
 

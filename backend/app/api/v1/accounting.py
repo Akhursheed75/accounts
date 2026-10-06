@@ -250,16 +250,31 @@ def _sync_bank_totals(db: Session, record: ShopDailyRecord, payload) -> None:
 
 
 def _attach_photos(db: Session, record: ShopDailyRecord, photo_ids: list[int], user: User) -> None:
+    """The photo is only a reference while the sheet is typed in. Once the sheet
+    is saved the figures are in the form, so the photo is deleted (file and row)."""
+    from app.services.storage import get_storage
+
+    photos = []
     for photo_id in photo_ids:
         photo = db.get(SheetPhoto, photo_id)
         if photo is None:
-            raise NotFound(f"Photo {photo_id} does not exist.")
+            continue  # already gone: nothing to keep or delete
         if photo.daily_record_id not in (None, record.id):
             raise Conflict("That photo already belongs to another sheet.")
         if photo.daily_record_id is None and photo.uploaded_by_id not in (None, user.id) \
                 and not user.has_permission("dashboard.view"):
             raise Forbidden("That photo was uploaded by someone else.")
-        photo.daily_record_id = record.id
+        photos.append(photo)
+    photos += [p for p in record.photos if p not in photos]
+    for photo in photos:
+        try:
+            get_storage().delete(photo.stored_key)
+        except Exception:  # noqa: BLE001 - a missing file must not block the save
+            pass
+        if photo in record.photos:
+            record.photos.remove(photo)
+        db.delete(photo)
+    db.flush()
 
 
 def _sync_expenses(db: Session, record: ShopDailyRecord, payload) -> None:
@@ -611,6 +626,39 @@ def pick_lines(
     db.commit()
     db.refresh(record)
     return _record_out(db, record)
+
+
+class PreviewLine(BaseModel):
+    bank_id: int
+    currency_code: str
+    amount: Decimal
+
+
+class PreviewIn(BaseModel):
+    business_date: date
+    record_id: int | None = None
+    details: list[PreviewLine] = []
+    totals: list[PreviewLine] = []
+
+
+@router.post("/accounting/daily/preview-match")
+def preview_match(
+    payload: PreviewIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require("accounting.read")),
+) -> dict:
+    """Colour the sheet while it is being typed: which deposits the uploaded
+    statements already show. Nothing is saved."""
+    if payload.record_id is not None:
+        _get_record(db, user, payload.record_id)
+    if len(payload.details) + len(payload.totals) > 400:
+        raise ValidationFailed("Too many amounts to check at once.")
+    return sheet_matching.preview(
+        db, payload.business_date, record_id=payload.record_id,
+        details=[(d.bank_id, d.currency_code, d.amount) for d in payload.details],
+        totals=[(t.bank_id, t.currency_code, t.amount) for t in payload.totals],
+        window_days=match_settings(db).date_window_days,
+    )
 
 
 def _get_record(db: Session, user: User, record_id: int) -> ShopDailyRecord:

@@ -388,3 +388,97 @@ def pick(
                  f"{total.currency_code} {total.amount} on {record.business_date}"),
         new_values={"transactions": transaction_ids},
     )
+
+
+# ------------------------------------------------- live check while typing
+def _claimed_by_others(db: Session, record_id: int | None) -> set[int]:
+    """Bank lines another sheet has already confirmed. Lines this sheet holds
+    (from an earlier save) stay available to it."""
+    query = (
+        select(ReconciliationMatch.bank_transaction_id)
+        .join(ShopTransfer, ShopTransfer.id == ReconciliationMatch.shop_transfer_id)
+        .where(ReconciliationMatch.is_active.is_(True), ReconciliationMatch.status == "CONFIRMED")
+    )
+    if record_id is not None:
+        query = query.where(ShopTransfer.daily_record_id != record_id)
+    return set(db.scalars(query))
+
+
+def preview(
+    db: Session, business_date: date, *, record_id: int | None,
+    details: list[tuple[int, str, Decimal]], totals: list[tuple[int, str, Decimal]],
+    window_days: int,
+) -> dict:
+    """What would turn green if the sheet were saved now — nothing is written.
+
+    Each listed deposit looks for a bank line of exactly its amount, in the same
+    bank and currency, from the sheet's day up to `window_days` later, that no
+    other sheet holds; two deposits never share a line. A total with no listed
+    deposits is FOUND when exactly one combination of that day's free lines
+    adds up to it."""
+    from datetime import timedelta
+
+    others = _claimed_by_others(db, record_id)
+    last_day = business_date + timedelta(days=max(window_days, 0))
+    cache: dict[tuple[int, str], list[BankTransaction]] = {}
+
+    def lines(bank_id: int, currency: str) -> list[BankTransaction]:
+        key = (bank_id, currency)
+        if key not in cache:
+            cache[key] = list(db.scalars(
+                select(BankTransaction).where(
+                    BankTransaction.bank_id == bank_id,
+                    BankTransaction.currency_code == currency,
+                    BankTransaction.txn_date >= business_date,
+                    BankTransaction.txn_date <= last_day,
+                    BankTransaction.direction == "CREDIT",
+                    BankTransaction.is_ignored.is_(False),
+                ).order_by(BankTransaction.txn_date, BankTransaction.id)
+            ))
+        return cache[key]
+
+    used: set[int] = set()
+    out_details = []
+    for bank_id, currency, amount in details:
+        pool = lines(bank_id, currency)
+        same = [t for t in pool if t.amount == amount]
+        free = [t for t in same if t.id not in others and t.id not in used]
+        if free:
+            hit = free[0]
+            used.add(hit.id)
+            # Two free lines of the same amount: the engine will ask a person.
+            several = len(free) > 1 and not any(
+                a == amount and (b, c) == (bank_id, currency)
+                for b, c, a in details[len(out_details) + 1:]
+            )
+            out_details.append({"status": "SEVERAL" if several else "FOUND",
+                                "bank_date": hit.txn_date.isoformat(),
+                                "description": hit.description})
+        elif any(t.id in others for t in same):
+            out_details.append({"status": "TAKEN", "bank_date": None,
+                                "description": "Already matched to another sheet"})
+        elif not pool:
+            out_details.append({"status": "NO_STATEMENT", "bank_date": None, "description": None})
+        else:
+            out_details.append({"status": "NOT_FOUND", "bank_date": None, "description": None})
+
+    listed = {(b, c) for b, c, _ in details}
+    out_totals = []
+    for bank_id, currency, amount in totals:
+        if (bank_id, currency) in listed:
+            out_totals.append({"status": "LISTED"})
+            continue
+        day = [t for t in lines(bank_id, currency)
+               if t.txn_date == business_date and t.id not in others and t.id not in used]
+        if not lines(bank_id, currency):
+            out_totals.append({"status": "NO_STATEMENT"})
+            continue
+        combos = find_combinations([(t.id, t.amount) for t in day], amount)
+        if combos and len(combos) == 1:
+            used.update(combos[0])
+            out_totals.append({"status": "FOUND"})
+        elif combos is None or (combos and len(combos) > 1):
+            out_totals.append({"status": "AMBIGUOUS"})
+        else:
+            out_totals.append({"status": "NOT_FOUND"})
+    return {"details": out_details, "totals": out_totals}

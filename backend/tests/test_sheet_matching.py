@@ -235,3 +235,38 @@ def test_paper_view_totals_in_dollars_and_shows_a_paper_arithmetic_slip(
     # The sheet's 256 is right; the 0.93 is the paper rounding each bank to whole dollars.
     assert paper["closing_declared_usd"] == "256.00"
     assert paper["closing_difference_usd"] == "0.93"
+
+
+# ------------------------------------------------ green while typing
+def preview(client, headers, world, *, details=(), totals=(), record_id=None):
+    body = {"business_date": DAY, "record_id": record_id,
+            "details": [detail(world, *d) for d in details],
+            "totals": [total(world, *t) for t in totals]}
+    response = client.post("/api/v1/accounting/daily/preview-match", json=body, headers=headers)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_pasted_deposits_show_green_before_saving(client, admin_headers, world, db):
+    load_statements(db, world)
+    result = preview(client, admin_headers, world,
+                     details=[("BAC", "NIO", "18000.00"), ("BAC", "NIO", "19030.00"),
+                              ("BAC", "NIO", "55555.00"), ("BANPRO", "NIO", "100.00")],
+                     totals=[("BAC", "USD", "1695.00"), ("LAFISE", "USD", "7066.00")])
+    assert [d["status"] for d in result["details"]] == ["FOUND", "FOUND", "NOT_FOUND", "NO_STATEMENT"]
+    assert [t["status"] for t in result["totals"]] == ["FOUND", "AMBIGUOUS"]
+
+
+def test_a_line_another_sheet_holds_is_not_offered_again(client, admin_headers, world, db):
+    load_statements(db, world)
+    save(client, admin_headers, world, "SHOP1",
+         transfers=[detail(world, "BAC", "NIO", "17822.00")],
+         totals=[total(world, "BAC", "NIO", "17822.00")])
+    result = preview(client, admin_headers, world, details=[("BAC", "NIO", "17822.00")])
+    assert result["details"][0]["status"] == "TAKEN"
+    # One $10 when the bank shows two: a person confirms which, as the engine will ask.
+    once = preview(client, admin_headers, world, details=[("BAC", "USD", "10.00")])
+    assert once["details"][0]["status"] == "SEVERAL"
+    # Two identical deposits typed on one sheet need two bank lines.
+    twice = preview(client, admin_headers, world, details=[("BAC", "USD", "10.00")] * 3)
+    assert [d["status"] for d in twice["details"]] == ["FOUND", "FOUND", "NOT_FOUND"]
