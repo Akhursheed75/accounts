@@ -129,13 +129,13 @@ def create_app() -> FastAPI:
         )
 
     from app.api.v1 import (
-        accounting, audit_log, banks, dashboard, monthly, reconciliation, reports,
+        accounting, audit_log, banks, dashboard, monthly, photos, reconciliation, reports,
         settings_admin, shops, statements, transactions, users,
     )
     from app.api.v1 import auth as auth_router
 
     for module in (
-        auth_router, users, shops, banks, accounting, statements,
+        auth_router, users, shops, banks, accounting, photos, statements,
         transactions, reconciliation, dashboard, reports, monthly, audit_log, settings_admin,
     ):
         app.include_router(module.router, prefix="/api/v1")
