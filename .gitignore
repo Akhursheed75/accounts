@@ -25,6 +25,8 @@ FIRST-LOGIN.txt
 # Uploaded statements and generated files
 backend/storage/
 backend/storage-test/
+storage-test/
+storage/
 backups/
 
 # Python
