@@ -4,6 +4,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -11,17 +12,19 @@ from app.core.deps import accessible_shop_ids, assert_shop_access, require
 from app.core.errors import Conflict, Forbidden, NotFound, ValidationFailed
 from app.db.session import get_db
 from app.models import (
-    BaleRecord, BaleType, Bank, BankAccount, Currency, Expense, Shop, ShopDailyRecord,
-    ShopTransfer, User,
+    BaleRecord, BaleType, Bank, BankAccount, Currency, Expense, SheetPhoto, Shop,
+    ShopBankTotal, ShopDailyRecord, ShopTransfer, User,
 )
 from app.schemas.accounting import (
     BaleTypeOut, DailyRecordIn, DailyRecordOut, DailyRecordRow, DailyRecordUpdate,
-    ExpenseOut, TransferOut,
+    ExpenseOut, PhotoOut, TransferOut,
 )
 from app.schemas.common import Message, Page
 from app.services import accounting as calc
 from app.services import audit
+from app.services import monthly
 from app.services import reconciliation as recon
+from app.services import sheet_matching
 from app.services.settings_store import match_settings, system_settings
 
 router = APIRouter(tags=["accounting"])
@@ -30,7 +33,8 @@ router = APIRouter(tags=["accounting"])
 # --------------------------------------------------------------- serialising
 def _transfer_out(transfer: ShopTransfer, status: dict) -> TransferOut:
     return TransferOut(
-        id=transfer.id, payment_method=transfer.payment_method, bank_id=transfer.bank_id,
+        id=transfer.id, payment_method=transfer.payment_method, source=transfer.source,
+        bank_id=transfer.bank_id,
         bank_code=transfer.bank.code if transfer.bank else None,
         bank_name=transfer.bank.name if transfer.bank else None,
         bank_account_id=transfer.bank_account_id,
@@ -84,7 +88,25 @@ def _record_out(db: Session, record: ShopDailyRecord) -> DailyRecordOut:
         cash_totals=calc.cash_totals(record),
         expense_totals=calc.expense_totals(record),
         balance=calc.balance_breakdown(record, components),
+        commercial_invoice_cash_usd=record.commercial_invoice_cash_usd,
+        commercial_invoice_deposit_usd=record.commercial_invoice_deposit_usd,
+        delivery_cash_usd=record.delivery_cash_usd,
+        delivery_transfer_usd=record.delivery_transfer_usd,
+        declared_closing_usd=record.declared_closing_usd,
+        bank_totals=[
+            {"id": t.id, "bank_id": t.bank_id, "bank_code": t.bank.code if t.bank else None,
+             "currency_code": t.currency_code, "amount": str(t.amount)}
+            for t in record.bank_totals
+        ],
+        bank_cells=sheet_matching.cells(db, record),
+        paper=calc.paper_view(record, components, _rate(db, record)),
+        photos=[PhotoOut.model_validate(p) for p in record.photos],
     )
+
+
+def _rate(db: Session, record: ShopDailyRecord) -> Decimal | None:
+    row = monthly.get_rate(db, record.business_date)
+    return row.nio_per_usd if row else None
 
 
 # ------------------------------------------------------------------ writing
@@ -109,6 +131,16 @@ def _validate_children(db: Session, payload: DailyRecordIn | DailyRecordUpdate) 
                     f"The account {account.label} is in {account.currency_code}, but the "
                     f"transfer is in {transfer.currency_code}."
                 )
+    seen_cells: set[tuple[int, str]] = set()
+    for total in payload.bank_totals:
+        if total.bank_id not in bank_ids:
+            raise NotFound(f"Bank {total.bank_id} does not exist.")
+        if total.currency_code not in currencies:
+            raise ValidationFailed(f"Currency '{total.currency_code}' is not configured.")
+        cell = (total.bank_id, total.currency_code)
+        if cell in seen_cells:
+            raise ValidationFailed("The same bank and currency appear twice in the totals.")
+        seen_cells.add(cell)
     for expense in payload.expenses:
         if expense.currency_code not in currencies:
             raise ValidationFailed(f"Currency '{expense.currency_code}' is not configured.")
@@ -124,6 +156,8 @@ def _apply(db: Session, record: ShopDailyRecord, payload, *, creating: bool) -> 
         "delivery_usd", "delivery_nio", "commercial_invoice_usd", "commercial_invoice_nio",
         "credit_usd", "credit_nio", "opening_balance_usd", "opening_balance_nio",
         "observations", "status",
+        "commercial_invoice_cash_usd", "commercial_invoice_deposit_usd",
+        "delivery_cash_usd", "delivery_transfer_usd",
     ]
     data = payload.model_dump(exclude_unset=not creating)
     for field in scalar_fields:
@@ -139,8 +173,14 @@ def _apply(db: Session, record: ShopDailyRecord, payload, *, creating: bool) -> 
     else:
         record.closing_balance_source = "COMPUTED"
 
+    if "declared_closing_usd" in data:
+        # None is a real answer here: the shop left the line blank.
+        record.declared_closing_usd = data["declared_closing_usd"]
+
     if "transfers" in data:
         _sync_transfers(db, record, payload)
+    if "bank_totals" in data:
+        _sync_bank_totals(db, record, payload)
     if "expenses" in data:
         _sync_expenses(db, record, payload)
     if "bale_records" in data:
@@ -148,7 +188,11 @@ def _apply(db: Session, record: ShopDailyRecord, payload, *, creating: bool) -> 
 
 
 def _sync_transfers(db: Session, record: ShopDailyRecord, payload) -> None:
-    existing = {t.id: t for t in record.transfers if t.deleted_at is None}
+    # The form owns the rows typed from the sheet. Lines found in or picked
+    # from a statement for a bank total are managed by the matcher.
+    existing = {
+        t.id: t for t in record.transfers if t.deleted_at is None and t.source == "SHEET"
+    }
     seen: set[int] = set()
     for item in payload.transfers:
         if item.id and item.id in existing:
@@ -174,7 +218,48 @@ def _sync_transfers(db: Session, record: ShopDailyRecord, payload) -> None:
     for tid, transfer in existing.items():
         if tid not in seen:
             # Soft delete: a payment that was once reconciled must stay traceable.
+            # Its match is undone (kept in history) so the bank line is free again.
+            recon.release_matches(db, transfer, reason="Payment removed from the daily sheet")
             transfer.deleted_at = datetime.now(UTC)
+
+
+def _sync_bank_totals(db: Session, record: ShopDailyRecord, payload) -> None:
+    wanted = {(t.bank_id, t.currency_code): t.amount for t in payload.bank_totals}
+    current = {(t.bank_id, t.currency_code): t for t in record.bank_totals}
+    changed_cells = set()
+    for cell, row in current.items():
+        if cell not in wanted:
+            record.bank_totals.remove(row)
+            changed_cells.add(cell)
+        elif row.amount != wanted[cell]:
+            row.amount = wanted[cell]
+            changed_cells.add(cell)
+    for cell, amount in wanted.items():
+        if cell not in current:
+            record.bank_totals.append(
+                ShopBankTotal(bank_id=cell[0], currency_code=cell[1], amount=amount)
+            )
+    # Lines a person picked for a total no longer prove anything once the
+    # total itself changes; they are released and the cell is open again.
+    now = datetime.now(UTC)
+    for transfer in record.transfers:
+        if (transfer.deleted_at is None and transfer.source == "PICKED"
+                and (transfer.bank_id, transfer.currency_code) in changed_cells):
+            recon.release_matches(db, transfer, reason="The sheet's bank total changed")
+            transfer.deleted_at = now
+
+
+def _attach_photos(db: Session, record: ShopDailyRecord, photo_ids: list[int], user: User) -> None:
+    for photo_id in photo_ids:
+        photo = db.get(SheetPhoto, photo_id)
+        if photo is None:
+            raise NotFound(f"Photo {photo_id} does not exist.")
+        if photo.daily_record_id not in (None, record.id):
+            raise Conflict("That photo already belongs to another sheet.")
+        if photo.daily_record_id is None and photo.uploaded_by_id not in (None, user.id) \
+                and not user.has_permission("dashboard.view"):
+            raise Forbidden("That photo was uploaded by someone else.")
+        photo.daily_record_id = record.id
 
 
 def _sync_expenses(db: Session, record: ShopDailyRecord, payload) -> None:
@@ -365,10 +450,10 @@ def create_record(
         new_values=_snapshot(record),
     )
     db.flush()
+    _attach_photos(db, record, payload.photo_ids, user)
     if run_matching:
-        settings = match_settings(db)
-        for transfer in record.transfers:
-            recon.run_for_transfer(db, transfer, settings, user=user)
+        # The whole day, not just this sheet: shops share bank accounts.
+        sheet_matching.rematch_day(db, record.business_date, match_settings(db), user=user)
     db.commit()
     db.refresh(record)
     return _record_out(db, record)
@@ -406,11 +491,11 @@ def update_record(
         summary=f"Edited the sheet for {record.business_date}",
         old_values=old, new_values=new,
     )
+    _attach_photos(db, record, payload.photo_ids, user)
     if run_matching:
         settings = match_settings(db)
-        for transfer in record.transfers:
-            if transfer.deleted_at is None:
-                recon.run_for_transfer(db, transfer, settings, user=user)
+        for day in {before["business_date"], record.business_date}:
+            sheet_matching.rematch_day(db, day, settings, user=user)
     db.commit()
     db.refresh(record)
     return _record_out(db, record)
@@ -460,3 +545,77 @@ def delete_record(
     )
     db.commit()
     return Message(message="Record archived. It no longer appears in reports but is kept for audit.")
+
+
+# ------------------------------------------------- bank totals and re-checking
+@router.post("/accounting/daily/{record_id}/recheck", response_model=DailyRecordOut)
+def recheck_day(
+    record_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(require("reconciliation.match")),
+) -> DailyRecordOut:
+    """Re-match every sheet of this sheet's day against the statements."""
+    record = _get_record(db, user, record_id)
+    sheet_matching.rematch_day(db, record.business_date, match_settings(db), user=user)
+    db.commit()
+    db.refresh(record)
+    return _record_out(db, record)
+
+
+@router.get("/accounting/daily/{record_id}/bank-totals/{total_id}/candidates")
+def total_candidates(
+    record_id: int,
+    total_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(require("reconciliation.read")),
+) -> dict:
+    record = _get_record(db, user, record_id)
+    total = next((t for t in record.bank_totals if t.id == total_id), None)
+    if total is None:
+        raise NotFound("That bank total is not on this sheet.")
+    chosen = {
+        t.id: t for t in record.transfers
+        if t.deleted_at is None and t.source in ("FOUND", "PICKED")
+        and (t.bank_id, t.currency_code) == (total.bank_id, total.currency_code)
+    }
+    confirmed = recon.transfer_statuses(db, list(chosen))
+    selected = {s["transaction_id"] for s in confirmed.values() if s.get("transaction_id")}
+    lines = sheet_matching.candidates(db, record, total)
+    return {
+        "total": {"id": total.id, "bank_code": total.bank.code if total.bank else None,
+                  "currency_code": total.currency_code, "amount": str(total.amount)},
+        "lines": [
+            {"id": t.id, "txn_date": t.txn_date.isoformat(), "amount": str(t.amount),
+             "description": t.description, "reference": t.reference or t.external_id,
+             "selected": t.id in selected}
+            for t in lines
+        ],
+    }
+
+
+class PickIn(BaseModel):
+    transaction_ids: list[int]
+
+
+@router.post("/accounting/daily/{record_id}/bank-totals/{total_id}/pick",
+             response_model=DailyRecordOut)
+def pick_lines(
+    record_id: int,
+    total_id: int,
+    payload: PickIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require("reconciliation.match")),
+) -> DailyRecordOut:
+    record = _get_record(db, user, record_id)
+    sheet_matching.pick(db, record, total_id, payload.transaction_ids, user)
+    db.commit()
+    db.refresh(record)
+    return _record_out(db, record)
+
+
+def _get_record(db: Session, user: User, record_id: int) -> ShopDailyRecord:
+    record = db.get(ShopDailyRecord, record_id)
+    if not record or record.deleted_at:
+        raise NotFound("That accounting record does not exist.")
+    assert_shop_access(user, record.shop_id)
+    return record

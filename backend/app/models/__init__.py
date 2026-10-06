@@ -1,7 +1,7 @@
 from app.db.base import Base
 from app.models.accounting import (
-    PAYMENT_BANK, PAYMENT_CASH, BaleRecord, BaleType, ExchangeRate, Expense, ShopDailyRecord,
-    ShopTransfer,
+    PAYMENT_BANK, PAYMENT_CASH, BaleRecord, BaleType, ExchangeRate, Expense, SheetPhoto,
+    ShopBankTotal, ShopDailyRecord, ShopTransfer,
 )
 from app.models.audit import AuditLog
 from app.models.auth import Permission, Role, User, UserShop, role_permissions
@@ -15,7 +15,7 @@ __all__ = [
     "Base", "Permission", "Role", "User", "UserShop", "role_permissions",
     "City", "Shop", "Bank", "BankAccount", "Currency",
     "ShopDailyRecord", "ShopTransfer", "Expense", "BaleRecord", "BaleType",
-    "ExchangeRate", "PAYMENT_BANK", "PAYMENT_CASH",
+    "ExchangeRate", "PAYMENT_BANK", "PAYMENT_CASH", "ShopBankTotal", "SheetPhoto",
     "BankStatement", "BankTransaction",
     "ReconciliationMatch", "MatchSetting",
     "AuditLog", "Job", "SystemSetting", "DEFAULT_BALANCE_COMPONENTS",

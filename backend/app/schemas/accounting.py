@@ -58,6 +58,7 @@ class TransferIn(BaseModel):
 class TransferOut(ORMModel):
     id: int
     payment_method: str = "BANK"
+    source: str = "SHEET"
     bank_id: int | None
     bank_code: str | None = None
     bank_name: str | None = None
@@ -129,6 +130,23 @@ class BaleTypeOut(ORMModel):
     is_active: bool
 
 
+class BankTotalIn(BaseModel):
+    """One cell of the sheet's TRANSFERS table."""
+    bank_id: int
+    currency_code: str = Field(min_length=3, max_length=3)
+    amount: Decimal = Field(gt=0)
+
+    @field_validator("amount")
+    @classmethod
+    def _amount(cls, v: Decimal) -> Decimal:
+        return _check_money(v)
+
+    @field_validator("currency_code")
+    @classmethod
+    def _currency(cls, v: str) -> str:
+        return v.upper()
+
+
 class DailyRecordIn(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
@@ -151,15 +169,26 @@ class DailyRecordIn(BaseModel):
     closing_balance_source: str = "COMPUTED"
     observations: str = Field("", max_length=4000)
     status: str = "DRAFT"
+    # The paper sheet's dollar-only lines.
+    commercial_invoice_cash_usd: Decimal = Field(Decimal("0.00"), ge=0)
+    commercial_invoice_deposit_usd: Decimal = Field(Decimal("0.00"), ge=0)
+    delivery_cash_usd: Decimal = Field(Decimal("0.00"), ge=0)
+    delivery_transfer_usd: Decimal = Field(Decimal("0.00"), ge=0)
+    declared_closing_usd: Decimal | None = None
     transfers: list[TransferIn] = []
+    bank_totals: list[BankTotalIn] = []
     expenses: list[ExpenseIn] = []
     bale_records: list[BaleIn] = []
+    # Photos uploaded before saving, to attach to this sheet.
+    photo_ids: list[int] = []
 
     @field_validator(
         "total_sales_usd", "total_sales_nio", "delivery_usd", "delivery_nio",
         "commercial_invoice_usd", "commercial_invoice_nio", "credit_usd", "credit_nio",
         "opening_balance_usd", "opening_balance_nio",
         "closing_balance_usd", "closing_balance_nio",
+        "commercial_invoice_cash_usd", "commercial_invoice_deposit_usd",
+        "delivery_cash_usd", "delivery_transfer_usd", "declared_closing_usd",
     )
     @classmethod
     def _money(cls, v):
@@ -239,6 +268,27 @@ class DailyRecordOut(ORMModel):
     cash_totals: dict[str, Decimal] = {}
     expense_totals: dict[str, Decimal] = {}
     balance: dict[str, BalanceSide] = {}
+    commercial_invoice_cash_usd: Decimal = Decimal("0.00")
+    commercial_invoice_deposit_usd: Decimal = Decimal("0.00")
+    delivery_cash_usd: Decimal = Decimal("0.00")
+    delivery_transfer_usd: Decimal = Decimal("0.00")
+    declared_closing_usd: Decimal | None = None
+    bank_totals: list[dict] = []
+    # The TRANSFERS table with a status per cell, and the sheet in dollars.
+    bank_cells: list[dict] = []
+    paper: dict = {}
+    photos: list["PhotoOut"] = []
+
+
+class PhotoOut(ORMModel):
+    id: int
+    original_filename: str
+    content_type: str
+    file_size: int
+    created_at: datetime
+    extraction: dict | None = None
+    extraction_model: str | None = None
+    extraction_error: str | None = None
 
 
 class DailyRecordRow(ORMModel):
@@ -259,3 +309,6 @@ class DailyRecordRow(ORMModel):
     possible_count: int = 0
     unmatched_count: int = 0
     pending_cash_count: int = 0
+
+
+DailyRecordOut.model_rebuild()

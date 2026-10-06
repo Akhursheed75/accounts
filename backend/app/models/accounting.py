@@ -7,6 +7,7 @@ from sqlalchemy import (
     Boolean, CheckConstraint, Date, DateTime, ForeignKey, Index, Integer,
     Numeric, String, Text, Time,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin
@@ -75,6 +76,23 @@ class ShopDailyRecord(Base, TimestampMixin):
 
     observations: Mapped[str] = mapped_column(Text, default="", nullable=False)
 
+    # --- the paper sheet's own lines, all in dollars ----------------------
+    commercial_invoice_cash_usd: Mapped[Decimal] = mapped_column(
+        MONEY, default=ZERO, server_default="0", nullable=False
+    )
+    commercial_invoice_deposit_usd: Mapped[Decimal] = mapped_column(
+        MONEY, default=ZERO, server_default="0", nullable=False
+    )
+    delivery_cash_usd: Mapped[Decimal] = mapped_column(
+        MONEY, default=ZERO, server_default="0", nullable=False
+    )
+    delivery_transfer_usd: Mapped[Decimal] = mapped_column(
+        MONEY, default=ZERO, server_default="0", nullable=False
+    )
+    # What the shop wrote as its closing balance. Kept beside the calculated
+    # figure, never instead of it, so an arithmetic slip on paper is visible.
+    declared_closing_usd: Mapped[Decimal | None] = mapped_column(MONEY)
+
     created_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
     updated_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -91,6 +109,13 @@ class ShopDailyRecord(Base, TimestampMixin):
     )
     bale_records: Mapped[list["BaleRecord"]] = relationship(
         back_populates="daily_record", cascade="all, delete-orphan", lazy="selectin"
+    )
+    bank_totals: Mapped[list["ShopBankTotal"]] = relationship(
+        back_populates="daily_record", cascade="all, delete-orphan", lazy="selectin",
+        order_by="ShopBankTotal.id",
+    )
+    photos: Mapped[list["SheetPhoto"]] = relationship(
+        back_populates="daily_record", lazy="selectin", order_by="SheetPhoto.id",
     )
 
 
@@ -133,6 +158,15 @@ class ShopTransfer(Base, TimestampMixin):
     reference: Mapped[str | None] = mapped_column(String(120), index=True)
     deposit_time: Mapped[time | None] = mapped_column(Time)
     note: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    # Where the row came from:
+    #   SHEET  typed from the shop's sheet (a detail line, or cash);
+    #   FOUND  a bank line the system found as part of a bank total the sheet
+    #          gave without listing deposits (re-found each time the day is
+    #          re-checked, so it can never go stale);
+    #   PICKED a bank line a person ticked as part of such a total.
+    source: Mapped[str] = mapped_column(
+        String(16), default="SHEET", server_default="SHEET", nullable=False
+    )
     # Set when a user decides this transfer will never have a bank counterpart.
     is_ignored: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     ignored_reason: Mapped[str | None] = mapped_column(String(255))
@@ -144,6 +178,58 @@ class ShopTransfer(Base, TimestampMixin):
     @property
     def is_cash(self) -> bool:
         return self.payment_method == PAYMENT_CASH
+
+
+class ShopBankTotal(Base, TimestampMixin):
+    """One cell of the sheet's TRANSFERS table: what the shop says reached one
+    bank in one currency that day. The deposits behind it are ShopTransfer
+    rows — typed from the sheet's detail lines when the shop lists them, or
+    found in the statement when it gives only the total."""
+
+    __tablename__ = "shop_bank_totals"
+    __table_args__ = (
+        CheckConstraint("amount > 0", name="amount_positive"),
+        Index(
+            "uq_shop_bank_totals_cell", "daily_record_id", "bank_id", "currency_code",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    daily_record_id: Mapped[int] = mapped_column(
+        ForeignKey("shop_daily_records.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    bank_id: Mapped[int] = mapped_column(ForeignKey("banks.id"), nullable=False)
+    currency_code: Mapped[str] = mapped_column(ForeignKey("currencies.code"), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(MONEY, nullable=False)
+
+    daily_record: Mapped[ShopDailyRecord] = relationship(back_populates="bank_totals")
+    bank: Mapped["Bank"] = relationship(lazy="joined")  # noqa: F821
+
+
+class SheetPhoto(Base, TimestampMixin):
+    """A photo of the paper sheet. Uploaded before the sheet exists (it is what
+    the form is filled from), then attached when the sheet is saved."""
+
+    __tablename__ = "sheet_photos"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    daily_record_id: Mapped[int | None] = mapped_column(
+        ForeignKey("shop_daily_records.id", ondelete="CASCADE"), index=True
+    )
+    stored_key: Mapped[str] = mapped_column(String(400), nullable=False)
+    original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    file_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    uploaded_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    # What the reader made of the photo, kept so a later question of "where
+    # did this number come from" has an answer.
+    extraction: Mapped[dict | None] = mapped_column(JSONB)
+    extraction_model: Mapped[str | None] = mapped_column(String(80))
+    extraction_error: Mapped[str | None] = mapped_column(Text)
+    extracted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    daily_record: Mapped[ShopDailyRecord | None] = relationship(back_populates="photos")
 
 
 class ExchangeRate(Base, TimestampMixin):
