@@ -48,7 +48,7 @@ export default function StatementsPage() {
     <>
       <PageHeader
         title="Bank statements"
-        description="Upload a statement PDF; the transactions are extracted and matched automatically."
+        description="Upload the day's statement PDFs (all six at once); transactions are extracted and matched to the daily sheets automatically."
         actions={
           <div className="flex gap-2">
             <button className="btn-secondary btn-sm" onClick={reload}>
@@ -58,7 +58,7 @@ export default function StatementsPage() {
             {can("statement.upload") && (
               <button className="btn-primary btn-sm" onClick={() => setUploadOpen(true)}>
                 <Upload className="h-4 w-4" />
-                Upload statement
+                Upload statements
               </button>
             )}
           </div>
@@ -155,13 +155,30 @@ export default function StatementsPage() {
         onClose={() => setUploadOpen(false)}
         onDone={() => {
           setUploadOpen(false);
-          toast.push("ok", "Uploaded. Processing runs in the background.");
+          toast.push("ok", "Uploaded. Processing runs in the background; daily sheets re-check themselves.");
           reload();
         }}
       />
     </>
   );
 }
+
+type Account = Bank["accounts"][number] & { bank: Bank };
+
+/** Guess the account from a file name such as "bac_usd.pdf" or "BANPRO cordobas.pdf". */
+function guessAccount(name: string, accounts: Account[]): string {
+  const n = name.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace("ficohsa", "fichosa");
+  const usd = /(usd|dolar|dollar|\$)/.test(n);
+  const nio = /(nio|cordoba|c\$|cs)/.test(n);
+  const byBank = accounts.filter((a) => n.includes(a.bank.code.toLowerCase()));
+  if (byBank.length === 0) return "";
+  const currency = usd && !nio ? "USD" : nio && !usd ? "NIO" : null;
+  const pick = currency ? byBank.filter((a) => a.currency_code === currency) : byBank;
+  return pick.length === 1 ? String(pick[0].id) : "";
+}
+
+interface Row { file: File; accountId: string; state: "ready" | "sending" | "done" | "failed"; error?: string }
 
 function UploadModal({
   open, banks, onClose, onDone,
@@ -171,81 +188,144 @@ function UploadModal({
   onClose: () => void;
   onDone: () => void;
 }) {
-  const [accountId, setAccountId] = useState("");
+  const [rows, setRows] = useState<Row[]>([]);
   const [periodStart, setPeriodStart] = useState("");
   const [periodEnd, setPeriodEnd] = useState("");
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
-  const accounts = banks.flatMap((bank) =>
+  const accounts: Account[] = banks.flatMap((bank) =>
     bank.accounts.map((account) => ({ ...account, bank })),
   );
-  const selected = accounts.find((account) => String(account.id) === accountId);
+
+  function choose(files: FileList | null) {
+    setError(null);
+    setRows(Array.from(files ?? []).map((file) => ({
+      file, accountId: guessAccount(file.name, accounts), state: "ready",
+    })));
+  }
+
+  function setRow(index: number, patch: Partial<Row>) {
+    setRows((current) => current.map((row, i) => (i === index ? { ...row, ...patch } : row)));
+  }
+
+  function close() {
+    setRows([]);
+    setError(null);
+    if (fileRef.current) fileRef.current.value = "";
+    onClose();
+  }
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     setError(null);
-    const file = fileRef.current?.files?.[0];
-    if (!file) {
-      setError(new Error("Choose a PDF file."));
+    if (rows.length === 0) {
+      setError(new Error("Choose the PDF files."));
       return;
     }
-    const body = new FormData();
-    body.append("bank_account_id", accountId);
-    body.append("file", file);
-    if (periodStart) body.append("period_start", periodStart);
-    if (periodEnd) body.append("period_end", periodEnd);
-    body.append("process_now", "true");
-
+    if (rows.some((row) => !row.accountId)) {
+      setError(new Error("Pick the bank account for every file."));
+      return;
+    }
+    const used = rows.map((row) => row.accountId);
+    if (new Set(used).size !== used.length) {
+      setError(new Error("Two files are set to the same account — check the account column."));
+      return;
+    }
     setBusy(true);
-    try {
-      await api.post("/statements/upload", body);
+    let failed = 0;
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i].state === "done") continue;
+      setRow(i, { state: "sending", error: undefined });
+      const body = new FormData();
+      body.append("bank_account_id", rows[i].accountId);
+      body.append("file", rows[i].file);
+      if (periodStart) body.append("period_start", periodStart);
+      if (periodEnd) body.append("period_end", periodEnd);
+      body.append("process_now", "true");
+      try {
+        await api.post("/statements/upload", body);
+        setRow(i, { state: "done" });
+      } catch (err) {
+        failed += 1;
+        setRow(i, { state: "failed", error: err instanceof Error ? err.message : "Upload failed" });
+      }
+    }
+    setBusy(false);
+    if (failed === 0) {
+      setRows([]);
+      if (fileRef.current) fileRef.current.value = "";
       onDone();
-    } catch (err) {
-      setError(err);
-    } finally {
-      setBusy(false);
     }
   }
 
   return (
     <Modal
       open={open}
-      onClose={onClose}
-      title="Upload a bank statement"
+      onClose={close}
+      title="Upload the day's bank statements"
       footer={
         <>
-          <button className="btn-secondary btn-sm" onClick={onClose}>Cancel</button>
+          <button className="btn-secondary btn-sm" onClick={close}>Close</button>
           <button className="btn-primary btn-sm" form="upload-form" type="submit" disabled={busy}>
-            Upload
+            {busy ? "Uploading…" : rows.length > 1 ? `Upload ${rows.length} files` : "Upload"}
           </button>
         </>
       }
     >
       <form id="upload-form" onSubmit={submit} className="space-y-3">
         <label className="block">
-          <span className="label">Bank account</span>
-          <select
-            className="input"
-            value={accountId}
-            onChange={(e) => setAccountId(e.target.value)}
-            required
-          >
-            <option value="">Choose the account this statement belongs to…</option>
-            {accounts.map((account) => (
-              <option key={account.id} value={account.id}>
-                {account.bank.code} — {account.label} ({account.currency_code})
-              </option>
-            ))}
-          </select>
+          <span className="label">PDF files — choose all of them at once</span>
+          <input
+            ref={fileRef} type="file" accept="application/pdf,.pdf" className="input" multiple
+            onChange={(e) => choose(e.target.files)}
+          />
+          <span className="mt-1 block text-xs text-ink-500">
+            Up to 25 MB each. The account is guessed from the file name (e.g. bac_usd.pdf,
+            banpro_nio.pdf) — check it before uploading. The same file twice for one account is refused.
+          </span>
         </label>
 
-        {selected && !selected.bank.parser_available && (
-          <p className="rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs text-amber-800">
-            No statement parser is configured for {selected.bank.name} yet. The file will be stored
-            safely, and processing will report what is missing rather than guessing at the layout.
-          </p>
+        {rows.length > 0 && (
+          <ul className="divide-y divide-ink-100 rounded border border-ink-200">
+            {rows.map((row, index) => {
+              const account = accounts.find((a) => String(a.id) === row.accountId);
+              return (
+                <li key={`${row.file.name}-${index}`} className="space-y-1.5 px-3 py-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="truncate text-sm font-medium">{row.file.name}</span>
+                    <span className={`shrink-0 text-xs font-medium ${
+                      row.state === "done" ? "text-emerald-700"
+                        : row.state === "failed" ? "text-red-700"
+                          : row.state === "sending" ? "text-ink-500" : "text-ink-400"}`}>
+                      {row.state === "done" ? "Uploaded" : row.state === "failed" ? "Failed"
+                        : row.state === "sending" ? "Sending…" : bytes(row.file.size)}
+                    </span>
+                  </div>
+                  <select
+                    className={`input ${row.accountId ? "" : "border-amber-400"}`}
+                    value={row.accountId}
+                    disabled={row.state === "done" || busy}
+                    onChange={(e) => setRow(index, { accountId: e.target.value })}
+                  >
+                    <option value="">Which account is this?</option>
+                    {accounts.map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.bank.code} — {a.label} ({a.currency_code})
+                      </option>
+                    ))}
+                  </select>
+                  {account && !account.bank.parser_available && (
+                    <p className="text-xs text-amber-800">
+                      No parser for {account.bank.name} yet — the file is kept, nothing is guessed.
+                    </p>
+                  )}
+                  {row.error && <p className="text-xs text-red-700">{row.error}</p>}
+                </li>
+              );
+            })}
+          </ul>
         )}
 
         <div className="grid gap-3 sm:grid-cols-2">
@@ -258,14 +338,6 @@ function UploadModal({
             <input type="date" className="input" value={periodEnd} onChange={(e) => setPeriodEnd(e.target.value)} />
           </label>
         </div>
-
-        <label className="block">
-          <span className="label">PDF file</span>
-          <input ref={fileRef} type="file" accept="application/pdf,.pdf" className="input" required />
-          <span className="mt-1 block text-xs text-ink-500">
-            PDF only, up to 25 MB. Uploading the same file twice for one account is refused.
-          </span>
-        </label>
 
         <ErrorNote error={error} />
       </form>

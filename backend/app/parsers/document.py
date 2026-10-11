@@ -47,6 +47,7 @@ class PdfDocument:
         self.filename = filename
         self._plumber = pdfplumber.open(io.BytesIO(data))
         self._ocr_cache: dict[int, str] = {}
+        self._ocr_words_cache: dict[int, list[Word]] = {}
         self._ocr_conf: dict[int, int] = {}
 
     def close(self) -> None:
@@ -101,10 +102,8 @@ class PdfDocument:
             shutil.which("pdftoppm")
         )
 
-    def ocr_page(self, page_number: int) -> str:
-        """Render one page at OCR dpi and run Tesseract over it."""
-        if page_number in self._ocr_cache:
-            return self._ocr_cache[page_number]
+    def _run_ocr(self, page_number: int, *args: str) -> str:
+        """Render one page at OCR dpi and run Tesseract over it with `args`."""
         if not self.ocr_available():
             raise OcrUnavailable(
                 "This statement has no readable text and OCR is not installed on the server."
@@ -127,22 +126,56 @@ class PdfDocument:
             tess = settings.tesseract_cmd or "tesseract"
             langs = settings.ocr_languages
             proc = subprocess.run(
-                [tess, str(images[0]), "stdout", "--psm", "6", "-l", langs],
+                [tess, str(images[0]), "stdout", *args, "-l", langs],
                 capture_output=True, timeout=300,
             )
             if proc.returncode != 0:
                 # A missing language pack is the usual cause; fall back to English.
                 proc = subprocess.run(
-                    [tess, str(images[0]), "stdout", "--psm", "6", "-l", "eng"],
+                    [tess, str(images[0]), "stdout", *args, "-l", "eng"],
                     capture_output=True, timeout=300,
                 )
             if proc.returncode != 0:
                 raise OcrUnavailable(
                     "OCR failed: " + proc.stderr.decode("utf-8", "ignore")[:300]
                 )
-            text = proc.stdout.decode("utf-8", "ignore")
-        self._ocr_cache[page_number] = text
-        return text
+            return proc.stdout.decode("utf-8", "ignore")
+
+    def ocr_page(self, page_number: int) -> str:
+        """Plain OCR text of one page, read as a single block (BAC's layout)."""
+        if page_number not in self._ocr_cache:
+            self._ocr_cache[page_number] = self._run_ocr(page_number, "--psm", "6")
+        return self._ocr_cache[page_number]
+
+    def ocr_words(self, page_number: int) -> list[Word]:
+        """OCR'd words with their positions, in the same units (PDF points) as
+        words(), so a parser that reads columns from a text layer can read a
+        scan of the same page without knowing the difference."""
+        if page_number in self._ocr_words_cache:
+            return self._ocr_words_cache[page_number]
+        tsv = self._run_ocr(page_number, "--psm", "4", "tsv")
+        scale = 72.0 / float(settings.ocr_dpi)
+        words: list[Word] = []
+        for line in tsv.splitlines()[1:]:
+            parts = line.split("\t")
+            if len(parts) < 12 or not parts[11].strip():
+                continue
+            try:
+                conf = float(parts[10])
+                left, top, width, height = (int(parts[i]) for i in (6, 7, 8, 9))
+            except ValueError:
+                continue
+            if conf < 0:
+                continue
+            words.append(
+                Word(
+                    parts[11].strip(),
+                    left * scale, (left + width) * scale,
+                    top * scale, (top + height) * scale,
+                )
+            )
+        self._ocr_words_cache[page_number] = words
+        return words
 
     @cached_property
     def ocr_text(self) -> str:

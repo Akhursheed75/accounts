@@ -1,11 +1,11 @@
 from app.db.base import Base
 from app.models.accounting import (
-    PAYMENT_BANK, PAYMENT_CASH, BaleRecord, BaleType, ExchangeRate, Expense, ShopDailyRecord,
-    ShopTransfer,
+    PAYMENT_BANK, PAYMENT_CASH, BaleRecord, BaleType, ExchangeRate, Expense, SheetPhoto,
+    ShopBankTotal, ShopDailyRecord, ShopTransfer,
 )
 from app.models.audit import AuditLog
 from app.models.auth import Permission, Role, User, UserShop, role_permissions
-from app.models.banking import BankStatement, BankTransaction
+from app.models.banking import BankBalance, BankStatement, BankTransaction
 from app.models.jobs import Job
 from app.models.org import Bank, BankAccount, City, Currency, Shop
 from app.models.reconciliation import MatchSetting, ReconciliationMatch
@@ -15,8 +15,8 @@ __all__ = [
     "Base", "Permission", "Role", "User", "UserShop", "role_permissions",
     "City", "Shop", "Bank", "BankAccount", "Currency",
     "ShopDailyRecord", "ShopTransfer", "Expense", "BaleRecord", "BaleType",
-    "ExchangeRate", "PAYMENT_BANK", "PAYMENT_CASH",
-    "BankStatement", "BankTransaction",
+    "ExchangeRate", "PAYMENT_BANK", "PAYMENT_CASH", "ShopBankTotal", "SheetPhoto",
+    "BankBalance", "BankStatement", "BankTransaction",
     "ReconciliationMatch", "MatchSetting",
     "AuditLog", "Job", "SystemSetting", "DEFAULT_BALANCE_COMPONENTS",
 ]

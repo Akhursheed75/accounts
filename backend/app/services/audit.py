@@ -45,6 +45,7 @@ class Actions:
     EXPORT_REPORT = "EXPORT_REPORT"
     EDIT_SETTINGS = "EDIT_SETTINGS"
     SET_EXCHANGE_RATE = "SET_EXCHANGE_RATE"
+    SET_BANK_BALANCE = "SET_BANK_BALANCE"
 
 
 def jsonable(value: Any) -> Any:

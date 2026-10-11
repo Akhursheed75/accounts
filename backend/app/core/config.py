@@ -35,6 +35,14 @@ class Settings(BaseSettings):
     ocr_dpi: int = 300
     ocr_languages: str = "eng+spa"
     tesseract_cmd: str | None = None
+
+    # Reading photos of the handwritten daily sheet. Optional: without a key the
+    # photo is still kept with the sheet and shown beside the form.
+    anthropic_api_key: str | None = None
+    anthropic_base_url: str = "https://api.anthropic.com"
+    sheet_reader_model: str = "claude-sonnet-5-5"
+    sheet_reader_timeout: int = 120
+    max_photo_bytes: int = 15 * 1024 * 1024
     poppler_path: str | None = None
 
     # --- reconciliation defaults ---------------------------------------

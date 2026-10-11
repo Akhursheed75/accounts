@@ -2,7 +2,7 @@
 
 import {
   BarChart3, CalendarDays, ClipboardList, FileSpreadsheet, FileText, GitCompareArrows, KeyRound,
-  LayoutDashboard, ListChecks, LogOut, Menu, Moon, ScrollText, Settings, Sun, X,
+  Landmark, LayoutDashboard, ListChecks, LogOut, Menu, Moon, ScrollText, Settings, Sun, X,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
@@ -26,6 +26,7 @@ const NAV: NavItem[] = [
   { href: "/accounting", label: "Daily accounting", icon: ClipboardList, permission: "accounting.read" },
   { href: "/monthly", label: "Monthly records", icon: CalendarDays, permission: "report.read" },
   { href: "/statements", label: "Bank statements", icon: FileText, permission: "statement.read" },
+  { href: "/balances", label: "Bank balances", icon: Landmark, permission: "statement.read" },
   { href: "/transactions", label: "Transactions", icon: ListChecks, permission: "transaction.read" },
   { href: "/reconciliation", label: "Reconciliation", icon: GitCompareArrows, permission: "reconciliation.read" },
   { href: "/unmatched", label: "Unmatched", icon: BarChart3, permission: "reconciliation.read" },

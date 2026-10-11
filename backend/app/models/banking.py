@@ -111,3 +111,21 @@ class BankTransaction(Base, TimestampMixin):
 
     statement: Mapped[BankStatement] = relationship(back_populates="transactions")
     bank: Mapped["Bank"] = relationship(lazy="joined")  # noqa: F821
+
+
+class BankBalance(Base, TimestampMixin):
+    """An account's closing balance for a day, typed by a person from the bank
+    when the statement does not print one (BANPRO's export has no balance)."""
+
+    __tablename__ = "bank_balances"
+    __table_args__ = (
+        UniqueConstraint("bank_account_id", "balance_date", name="uq_bank_balances_day"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    bank_account_id: Mapped[int] = mapped_column(
+        ForeignKey("bank_accounts.id"), nullable=False, index=True
+    )
+    balance_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    closing_balance: Mapped[Decimal] = mapped_column(MONEY, nullable=False)
+    entered_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))

@@ -1,9 +1,10 @@
 "use client";
 
-import { AlertTriangle, Banknote, Landmark, Loader2, Plus, Trash2 } from "lucide-react";
+import { AlertTriangle, Banknote, Check, Landmark, Loader2, Plus, Trash2, Undo2, X } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { SheetPhotoDrop, SheetPhotoPanel, useSheetPhotos } from "./sheet-photo";
 import { Card, CurrencyTag, ErrorNote, StatusBadge, useToast } from "./ui";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
@@ -24,6 +25,8 @@ interface TransferDraft {
   reference: string;
   note: string;
   match_status?: string;
+  direction: "CREDIT" | "DEBIT";
+  bank_date: string;
 }
 
 interface ExpenseDraft {
@@ -47,6 +50,35 @@ interface BaleDraft {
 }
 
 const newKey = () => Math.random().toString(36).slice(2);
+
+type Tone = "green" | "amber" | "red" | "grey";
+const ROW_TONE: Record<Tone, string> = {
+  green: "border-emerald-500 bg-emerald-50",
+  amber: "border-amber-500 bg-amber-50",
+  red: "border-red-500 bg-red-50",
+  grey: "border-ink-200 bg-ink-50/60",
+};
+const TEXT_TONE: Record<Tone, string> = {
+  green: "text-emerald-700",
+  amber: "text-amber-700",
+  red: "text-red-700",
+  grey: "text-ink-500",
+};
+const SAVED_WORDS: Record<string, string> = {
+  MATCHED: "On the statement",
+  POSSIBLE: "Confirm the match",
+  UNMATCHED: "Not on the statement",
+};
+const LIVE_TONE: Record<string, Tone> = {
+  FOUND: "green", SEVERAL: "amber", TAKEN: "red", NOT_FOUND: "red", NO_STATEMENT: "grey",
+};
+const LIVE_WORDS: Record<string, string> = {
+  FOUND: "On the statement",
+  SEVERAL: "On the statement twice: confirm after saving",
+  TAKEN: "Already used by another shop's sheet",
+  NOT_FOUND: "Not on the statement",
+  NO_STATEMENT: "Statement not uploaded yet",
+};
 
 /** Only complains once something has been typed — a blank new row is not an error yet. */
 function invalidAmount(raw: string): boolean {
@@ -87,6 +119,22 @@ export function RecordForm({ record }: { record?: DailyRecord }) {
   const { can } = useAuth();
   const editing = Boolean(record);
 
+  // Fields of a saved sheet that this form does not edit; read loosely so the
+  // form still builds against an older type definition.
+  type KeptTransfer = { id: number; bank_date?: string | null; direction?: string };
+  const kept = record as
+    | (DailyRecord & {
+        delivery_cash_usd?: string;
+        delivery_transfer_usd?: string;
+        commercial_invoice_cash_usd?: string;
+        commercial_invoice_deposit_usd?: string;
+        declared_closing_usd?: string | null;
+        bank_totals?: { bank_id: number; currency_code: string; amount: string }[];
+      })
+    | undefined;
+  const keptTransfer = (id?: number | null): KeptTransfer | undefined =>
+    id ? (record?.transfers as KeptTransfer[] | undefined)?.find((t) => t.id === id) : undefined;
+
   const shops = useApi(() => api.get<Shop[]>("/shops"), []);
   const banks = useApi(() => api.get<Bank[]>("/banks"), []);
   const baleTypes = useApi(() => api.get<BaleType[]>("/accounting/bale-types"), []);
@@ -123,6 +171,8 @@ export function RecordForm({ record }: { record?: DailyRecord }) {
       reference: t.reference ?? "",
       note: t.note,
       match_status: t.match_status,
+      direction: t.direction ?? "CREDIT",
+      bank_date: t.bank_date ?? "",
     })) ?? [],
   );
   const [expenses, setExpenses] = useState<ExpenseDraft[]>(
@@ -181,7 +231,9 @@ export function RecordForm({ record }: { record?: DailyRecord }) {
   // Bank and cash are separate lines on the sheet, as they are on paper.
   const transferTotals = useMemo(() => {
     const totals = { USD: 0, NIO: 0 };
-    for (const t of transfers) if (t.payment_method === "BANK") totals[t.currency_code] += num(t.amount);
+    for (const t of transfers) {
+      if (t.payment_method === "BANK") totals[t.currency_code] += (t.direction === "DEBIT" ? -1 : 1) * num(t.amount);
+    }
     return totals;
   }, [transfers]);
 
@@ -198,6 +250,27 @@ export function RecordForm({ record }: { record?: DailyRecord }) {
     [date.slice(0, 7)],
   );
   const nioPerUsd = rate.data?.nio_per_usd ? Number(rate.data.nio_per_usd) : null;
+
+  // Which lines make up the closing balance, as set in Settings. If they
+  // cannot be read (a user without settings access), the default formula.
+  const systemSettings = useApi(
+    () =>
+      api.get<{ balance_components: { key: string; sign: number; enabled: boolean }[] }>(
+        "/settings/system",
+      ),
+    [],
+  );
+  const balanceComponents = useMemo(
+    () =>
+      systemSettings.data?.balance_components ?? [
+        { key: "opening_balance", sign: 1, enabled: true },
+        { key: "total_sales", sign: 1, enabled: true },
+        { key: "total_expenses", sign: -1, enabled: true },
+        { key: "total_transfers", sign: -1, enabled: true },
+        { key: "total_cash", sign: -1, enabled: true },
+      ],
+    [systemSettings.data],
+  );
   const receivedInUsd =
     nioPerUsd && nioPerUsd > 0
       ? transferTotals.USD + cashTotals.USD + (transferTotals.NIO + cashTotals.NIO) / nioPerUsd
@@ -238,6 +311,44 @@ export function RecordForm({ record }: { record?: DailyRecord }) {
     [openUsd, openNio, salesUsd, salesNio, expenseTotals, transferTotals, cashTotals],
   );
 
+  // The paper sheet closes in dollars only: every cordoba amount is converted
+  // at the month's rate before it is added or subtracted, following the
+  // components switched on in Settings (delivery and credit included). Without
+  // a rate there is no honest single figure, so null.
+  const computedUsdTotal = useMemo(() => {
+    if (!nioPerUsd || nioPerUsd <= 0) return null;
+    const values: Record<string, { USD: number; NIO: number }> = {
+      opening_balance: { USD: num(openUsd), NIO: num(openNio) },
+      total_sales: { USD: num(salesUsd), NIO: num(salesNio) },
+      total_expenses: expenseTotals,
+      total_transfers: transferTotals,
+      total_cash: cashTotals,
+      delivery: {
+        USD: num(deliveryUsd) + num(kept?.delivery_cash_usd ?? "0") + num(kept?.delivery_transfer_usd ?? "0"),
+        NIO: num(deliveryNio),
+      },
+      credit: { USD: num(creditUsd), NIO: num(creditNio) },
+      commercial_invoice: {
+        USD:
+          num(invoiceUsd) +
+          num(kept?.commercial_invoice_cash_usd ?? "0") +
+          num(kept?.commercial_invoice_deposit_usd ?? "0"),
+        NIO: num(invoiceNio),
+      },
+    };
+    let total = 0;
+    for (const c of balanceComponents) {
+      if (!c.enabled || !c.sign) continue;
+      const v = values[c.key];
+      if (v) total += c.sign * (v.USD + v.NIO / nioPerUsd);
+    }
+    return total;
+  }, [
+    nioPerUsd, balanceComponents, openUsd, openNio, salesUsd, salesNio, expenseTotals,
+    transferTotals, cashTotals, deliveryUsd, deliveryNio, creditUsd, creditNio,
+    invoiceUsd, invoiceNio, kept,
+  ]);
+
   // Focus moves to the amount of whichever row was just created, so a second
   // deposit is "Enter, type, Enter" rather than a reach for the mouse.
   const amountInputs = useRef<Record<string, HTMLInputElement | null>>({});
@@ -274,6 +385,8 @@ export function RecordForm({ record }: { record?: DailyRecord }) {
             amount: "",
             reference: "",
             note: "",
+            direction: "CREDIT",
+            bank_date: "",
           },
         ];
       });
@@ -283,8 +396,111 @@ export function RecordForm({ record }: { record?: DailyRecord }) {
   );
 
   function updateTransfer(key: string, patch: Partial<TransferDraft>) {
-    setTransfers((rows) => rows.map((row) => (row.key === key ? { ...row, ...patch } : row)));
+    setTransfers((rows) =>
+      rows.map((row) => {
+        if (row.key !== key) return row;
+        const next = { ...row, ...patch };
+        // A changed bank, currency or amount is a different payment: its old
+        // bank match no longer says anything, so it is checked again.
+        const changed =
+          next.payment_method !== row.payment_method || next.bank_id !== row.bank_id
+          || next.currency_code !== row.currency_code || num(next.amount) !== num(row.amount)
+          || next.direction !== row.direction || next.bank_date !== row.bank_date;
+        return changed ? { ...next, match_status: undefined } : next;
+      }),
+    );
   }
+
+  /** "185-1510", "185 1510" or a pasted list: one row per payment, same bank and currency. */
+  function splitInto(key: string, raw: string): boolean {
+    const parts = raw
+      .split(/[\s;/+]+|,(?=\s)|(?<=\d)\s*-\s*(?=\d)/)
+      .map((p) => cleanAmount(p))
+      .filter((p) => num(p) > 0);
+    if (parts.length < 2) return false;
+    const lastKey = newKey();
+    setTransfers((rows) => {
+      const i = rows.findIndex((r) => r.key === key);
+      if (i < 0) return rows;
+      const row = rows[i];
+      const extra = parts.slice(1).map((amount, n) => ({
+        ...row, key: n === parts.length - 2 ? lastKey : newKey(), id: undefined,
+        amount, reference: "", note: "", match_status: undefined, bank_date: "",
+      }));
+      const first = { ...row, amount: parts[0], match_status: num(parts[0]) === num(row.amount) ? row.match_status : undefined };
+      return [...rows.slice(0, i), first, ...extra, ...rows.slice(i + 1)];
+    });
+    setFocusRow(lastKey);
+    return true;
+  }
+
+  /** "-" after an amount, as written on paper: the next payment, same bank and currency. */
+  function nextLike(key: string) {
+    const fresh = newKey();
+    setTransfers((rows) => {
+      const i = rows.findIndex((r) => r.key === key);
+      if (i < 0) return rows;
+      const row = rows[i];
+      const added = { ...row, key: fresh, id: undefined, amount: "", reference: "", note: "", match_status: undefined, bank_date: "" };
+      return [...rows.slice(0, i + 1), added, ...rows.slice(i + 1)];
+    });
+    setFocusRow(fresh);
+  }
+
+  /* Green while typing: each bank payment is checked against the uploaded
+     statements as it is entered, before anything is saved. */
+  const [live, setLive] = useState<Record<string, { status: string; description: string | null }>>({});
+  const liveSignature = JSON.stringify([
+    date, record?.id,
+    transfers.map((t) => [t.key, t.payment_method, t.bank_id, t.currency_code, num(t.amount), Boolean(t.match_status), t.direction, t.bank_date]),
+  ]);
+  useEffect(() => {
+    const bankRows = transfers.filter((t) => t.payment_method === "BANK" && t.bank_id && num(t.amount) > 0);
+    const saved = bankRows.filter((t) => t.match_status);
+    const fresh = bankRows.filter((t) => !t.match_status);
+    if (!fresh.length || !date) {
+      setLive({});
+      return;
+    }
+    const line = (t: TransferDraft) => ({
+      bank_id: Number(t.bank_id), currency_code: t.currency_code, amount: cleanAmount(t.amount),
+      bank_date: t.bank_date || null, direction: t.direction,
+    });
+    const timer = setTimeout(async () => {
+      try {
+        const answer = await api.post<{ details: { status: string; description: string | null }[] }>(
+          "/accounting/daily/preview-match",
+          { business_date: date, record_id: record?.id ?? null, details: [...saved, ...fresh].map(line), totals: [] },
+        );
+        const out: Record<string, { status: string; description: string | null }> = {};
+        fresh.forEach((t, i) => { out[t.key] = answer.details[saved.length + i]; });
+        setLive(out);
+      } catch {
+        /* the colours just stay as they were */
+      }
+    }, 400);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveSignature]);
+
+  /** green / amber / red / grey for one payment row, and the words for it. */
+  function rowState(t: TransferDraft): { tone: Tone; words: string } | null {
+    if (t.payment_method !== "BANK" || !(num(t.amount) > 0) || !t.bank_id) return null;
+    if (t.match_status) {
+      const tone: Tone = t.match_status === "MATCHED" ? "green"
+        : t.match_status === "POSSIBLE" ? "amber"
+          : t.match_status === "UNMATCHED" ? "red" : "grey";
+      return { tone, words: SAVED_WORDS[t.match_status] ?? t.match_status.toLowerCase() };
+    }
+    const l = live[t.key];
+    if (!l) return { tone: "grey", words: "Checking…" };
+    return { tone: LIVE_TONE[l.status] ?? "grey", words: LIVE_WORDS[l.status] ?? l.status };
+  }
+  const liveCount = transfers.filter((t) => rowState(t)?.tone === "green").length;
+  const bankCount = transfers.filter((t) => rowState(t)).length;
+
+  const [photoError, setPhotoError] = useState<unknown>(null);
+  const sheetPhotos = useSheetPhotos(setPhotoError);
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -324,6 +540,20 @@ export function RecordForm({ record }: { record?: DailyRecord }) {
       closing_balance_source: manualClose ? "MANUAL" : "COMPUTED",
       observations,
       status,
+      // Fields this form does not show are sent back as they were. The API
+      // resets anything left out to zero, so without these a save here
+      // silently wiped the delivery split, the bank totals and the written
+      // closing balance.
+      delivery_cash_usd: kept?.delivery_cash_usd ?? "0",
+      delivery_transfer_usd: kept?.delivery_transfer_usd ?? "0",
+      commercial_invoice_cash_usd: kept?.commercial_invoice_cash_usd ?? "0",
+      commercial_invoice_deposit_usd: kept?.commercial_invoice_deposit_usd ?? "0",
+      declared_closing_usd: kept?.declared_closing_usd ?? null,
+      bank_totals: (kept?.bank_totals ?? []).map((b) => ({
+        bank_id: b.bank_id,
+        currency_code: b.currency_code,
+        amount: b.amount,
+      })),
       transfers: transfers.map((t) => ({
         id: t.id,
         payment_method: t.payment_method,
@@ -334,6 +564,8 @@ export function RecordForm({ record }: { record?: DailyRecord }) {
         amount: cleanAmount(t.amount),
         reference: t.reference || null,
         note: t.note,
+        direction: t.payment_method === "CASH" ? "CREDIT" : t.direction,
+        bank_date: t.bank_date || null,
       })),
       expenses: expenses.map((e) => ({
         id: e.id,
@@ -342,6 +574,7 @@ export function RecordForm({ record }: { record?: DailyRecord }) {
         currency_code: e.currency_code,
         amount: e.amount || "0",
       })),
+      photo_ids: sheetPhotos.ids,
       bale_records: baleRows.map((b) => ({
         id: b.id,
         bale_type_id: b.bale_type_id,
@@ -371,8 +604,14 @@ export function RecordForm({ record }: { record?: DailyRecord }) {
   const readOnly = record?.status === "LOCKED" && !can("accounting.lock");
 
   return (
-    <form onSubmit={submit} className="space-y-4 pb-24">
-      <ErrorNote error={error} />
+    <div className={sheetPhotos.photos.length ? "grid gap-4 xl:grid-cols-[minmax(0,5fr)_minmax(0,7fr)]" : ""}>
+    {sheetPhotos.photos.length > 0 && <SheetPhotoPanel photos={sheetPhotos.photos} />}
+    <form onSubmit={submit} className="min-w-0 space-y-4 pb-24">
+      <ErrorNote error={error ?? photoError} />
+      {!readOnly && (
+        <SheetPhotoDrop hasPhoto={sheetPhotos.photos.length > 0} uploading={sheetPhotos.uploading}
+          onFile={sheetPhotos.add} />
+      )}
 
       {readOnly && (
         <div className="rounded-lg border border-ink-300 bg-ink-100 px-3 py-2 text-sm text-ink-700">
@@ -478,11 +717,12 @@ export function RecordForm({ record }: { record?: DailyRecord }) {
                 (a) => a.currency_code === transfer.currency_code,
               );
               const duplicate = duplicateKeys.has(transfer.key);
+              const state = rowState(transfer);
               return (
                 <div
                   key={transfer.key}
                   className={`rounded-lg border p-3 ${
-                    cash ? "border-sky-200 bg-sky-50/50" : "border-ink-200 bg-ink-50/60"
+                    cash ? "border-sky-200 bg-sky-50/50" : state ? ROW_TONE[state.tone] : "border-ink-200 bg-ink-50/60"
                   }`}
                 >
                   <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
@@ -537,6 +777,27 @@ export function RecordForm({ record }: { record?: DailyRecord }) {
                         <Banknote className="h-3.5 w-3.5" />
                         Cash
                       </button>
+                      {!cash && (
+                        <button
+                          type="button"
+                          aria-pressed={transfer.direction === "DEBIT"}
+                          disabled={readOnly}
+                          title="Money paid back out of the bank, matched to the debit on the statement"
+                          onClick={() =>
+                            updateTransfer(transfer.key, {
+                              direction: transfer.direction === "DEBIT" ? "CREDIT" : "DEBIT",
+                            })
+                          }
+                          className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs font-semibold transition ${
+                            transfer.direction === "DEBIT"
+                              ? "border-violet-600 bg-violet-600 text-white"
+                              : "border-ink-300 bg-surface text-ink-700 hover:bg-ink-100"
+                          }`}
+                        >
+                          <Undo2 className="h-3.5 w-3.5" />
+                          Refund
+                        </button>
+                      )}
                     </div>
 
                     {/* Currency as a two-way switch: the choice is always one of two. */}
@@ -564,6 +825,7 @@ export function RecordForm({ record }: { record?: DailyRecord }) {
 
                     <div className="relative min-w-[8rem] flex-1 sm:max-w-[12rem]">
                       <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-xs text-ink-400">
+                        {transfer.direction === "DEBIT" && !cash ? "−" : ""}
                         {transfer.currency_code === "USD" ? "$" : "C$"}
                       </span>
                       <input
@@ -577,11 +839,24 @@ export function RecordForm({ record }: { record?: DailyRecord }) {
                         value={transfer.amount}
                         disabled={readOnly}
                         aria-label={`Amount for payment ${index + 1}`}
-                        onChange={(e) => updateTransfer(transfer.key, { amount: e.target.value })}
+                        onChange={(e) => {
+                          if (!splitInto(transfer.key, e.target.value)) {
+                            updateTransfer(transfer.key, { amount: e.target.value });
+                          }
+                        }}
+                        onPaste={(e) => {
+                          if (splitInto(transfer.key, e.clipboardData.getData("text"))) e.preventDefault();
+                        }}
                         onBlur={(e) =>
                           updateTransfer(transfer.key, { amount: cleanAmount(e.target.value) })
                         }
                         onKeyDown={(e) => {
+                          if (e.key === "-" && num(transfer.amount) > 0 && !readOnly) {
+                            e.preventDefault();
+                            updateTransfer(transfer.key, { amount: cleanAmount(transfer.amount) });
+                            nextLike(transfer.key);
+                            return;
+                          }
                           if (e.key !== "Enter") return;
                           // Enter would otherwise submit the whole sheet; here it
                           // means "this one is done, give me another row".
@@ -595,7 +870,14 @@ export function RecordForm({ record }: { record?: DailyRecord }) {
                     </div>
 
                     <div className="ml-auto flex items-center gap-2">
-                      {transfer.match_status && <StatusBadge status={transfer.match_status} />}
+                      {state ? (
+                        <span className={`inline-flex items-center gap-1 text-xs font-semibold ${TEXT_TONE[state.tone]}`}>
+                          {state.tone === "green" ? <Check className="h-4 w-4" /> : state.tone === "red" ? <X className="h-4 w-4" /> : null}
+                          {state.words}
+                        </span>
+                      ) : (
+                        transfer.match_status && <StatusBadge status={transfer.match_status} />
+                      )}
                       {!readOnly && (
                         <button
                           type="button"
@@ -611,7 +893,20 @@ export function RecordForm({ record }: { record?: DailyRecord }) {
                     </div>
                   </div>
 
-                  <div className="mt-2 grid gap-2 sm:grid-cols-3 sm:pl-8">
+                  <div className="mt-2 grid gap-2 sm:grid-cols-4 sm:pl-8">
+                    {!cash && (
+                      <label className="flex items-center gap-1.5 text-xs text-ink-500" title="The day the bank statement shows it, when that is not this sheet's day">
+                        <span className="shrink-0">Bank date</span>
+                        <input
+                          type="date"
+                          className="input py-1 text-xs"
+                          value={transfer.bank_date}
+                          disabled={readOnly}
+                          aria-label={`Bank date for payment ${index + 1}`}
+                          onChange={(e) => updateTransfer(transfer.key, { bank_date: e.target.value })}
+                        />
+                      </label>
+                    )}
                     {!cash && (
                       <select
                         className="input py-1.5 text-xs"
@@ -639,7 +934,7 @@ export function RecordForm({ record }: { record?: DailyRecord }) {
                       placeholder={cash ? "Receipt no. (optional)" : "Deposit slip no."}
                     />
                     <input
-                      className={`input py-1.5 text-xs ${cash ? "sm:col-span-2" : ""}`}
+                      className={`input py-1.5 text-xs ${cash ? "sm:col-span-3" : ""}`}
                       value={transfer.note}
                       disabled={readOnly}
                       aria-label="Note"
@@ -665,8 +960,10 @@ export function RecordForm({ record }: { record?: DailyRecord }) {
 
         {!readOnly && transfers.length > 0 && (
           <p className="mt-2 text-xs text-ink-500">
-            Press <kbd className="rounded border border-ink-300 px-1">Enter</kbd> in an amount to
-            start the next row with the same bank and currency. Enter the day&apos;s cash as one
+            Type the breakdown as on paper, <kbd className="rounded border border-ink-300 px-1">185-1510</kbd>,
+            or paste a list: each amount becomes its own row with the same bank and currency, and turns
+            green as soon as the uploaded statement shows it ({liveCount} of {bankCount} found).
+            <kbd className="rounded border border-ink-300 px-1">Enter</kbd> also starts the next row. Enter the day&apos;s cash as one
             line per currency — the amount the shop will take to the bank — so it can be matched to
             that deposit.
           </p>
@@ -881,34 +1178,22 @@ export function RecordForm({ record }: { record?: DailyRecord }) {
           </label>
           <div className="mt-3 grid gap-3 sm:grid-cols-2">
             <div>
-              <span className="label">Closing balance (USD)</span>
+              <span className="label">
+                Closing balance (USD{nioPerUsd ? `, C$ converted at ${nioPerUsd}` : ""})
+              </span>
               {manualClose ? (
                 <input
                   className="input tabular"
                   inputMode="decimal"
                   value={closeUsd}
                   disabled={readOnly}
-                  onChange={(e) => setCloseUsd(e.target.value)}
+                  onChange={(e) => { setCloseUsd(e.target.value); setCloseNio("0"); }}
                 />
               ) : (
                 <p className="tabular rounded-lg border border-dashed border-ink-300 px-3 py-2 text-sm">
-                  {money(computed.USD, "USD")}
-                </p>
-              )}
-            </div>
-            <div>
-              <span className="label">Closing balance (C$)</span>
-              {manualClose ? (
-                <input
-                  className="input tabular"
-                  inputMode="decimal"
-                  value={closeNio}
-                  disabled={readOnly}
-                  onChange={(e) => setCloseNio(e.target.value)}
-                />
-              ) : (
-                <p className="tabular rounded-lg border border-dashed border-ink-300 px-3 py-2 text-sm">
-                  {money(computed.NIO, "NIO")}
+                  {computedUsdTotal === null
+                    ? "Set this month's exchange rate to see the closing balance"
+                    : money(computedUsdTotal, "USD")}
                 </p>
               )}
             </div>
@@ -955,6 +1240,7 @@ export function RecordForm({ record }: { record?: DailyRecord }) {
         </div>
       </div>
     </form>
+    </div>
   );
 }
 

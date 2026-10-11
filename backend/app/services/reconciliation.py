@@ -66,7 +66,9 @@ def score_pair(
         return None
     if transfer.bank_account_id and transfer.bank_account_id != txn.bank_account_id:
         return None
-    if txn.direction != "CREDIT" and not settings.match_debit_transactions:
+    # A deposit matches money coming in; a refund on the sheet matches the
+    # debit that paid it out. Never one for the other.
+    if txn.direction != (transfer.direction or "CREDIT"):
         return None
 
     amount_delta = (txn.amount - transfer.amount).copy_abs()
@@ -77,6 +79,10 @@ def score_pair(
     if cash:
         # Cash cannot be banked before it was received.
         if date_delta < 0 or date_delta > settings.cash_deposit_window_days:
+            return None
+    elif transfer.bank_date is not None:
+        # The sheet says which day the bank shows it: only that day.
+        if date_delta != 0:
             return None
     elif abs(date_delta) > settings.date_window_days:
         return None
@@ -152,6 +158,11 @@ def score_pair(
     )
 
 
+def match_date(transfer: ShopTransfer, record: ShopDailyRecord) -> date:
+    """The day to look for the payment on the statements."""
+    return transfer.bank_date or record.business_date
+
+
 def confirmed_transaction_ids(db: Session) -> set[int]:
     rows = db.scalars(
         select(ReconciliationMatch.bank_transaction_id).where(
@@ -166,7 +177,7 @@ def find_candidates(
     db: Session, transfer: ShopTransfer, settings: MatchSetting
 ) -> list[Candidate]:
     record = transfer.daily_record or db.get(ShopDailyRecord, transfer.daily_record_id)
-    record_date = record.business_date
+    record_date = match_date(transfer, record)
 
     stmt = select(BankTransaction).where(
         BankTransaction.currency_code == transfer.currency_code,
@@ -181,14 +192,13 @@ def find_candidates(
             <= record_date + timedelta(days=settings.cash_deposit_window_days),
         )
     else:
-        window = timedelta(days=settings.date_window_days)
+        window = timedelta(days=0 if transfer.bank_date else settings.date_window_days)
         stmt = stmt.where(
             BankTransaction.bank_id == transfer.bank_id,
             BankTransaction.txn_date >= record_date - window,
             BankTransaction.txn_date <= record_date + window,
         )
-    if not settings.match_debit_transactions:
-        stmt = stmt.where(BankTransaction.direction == "CREDIT")
+    stmt = stmt.where(BankTransaction.direction == (transfer.direction or "CREDIT"))
     if transfer.bank_account_id:
         stmt = stmt.where(BankTransaction.bank_account_id == transfer.bank_account_id)
 
@@ -439,7 +449,7 @@ def manual_match(
 
     settings = db.get(MatchSetting, 1)
     record = db.get(ShopDailyRecord, transfer.daily_record_id)
-    scored = score_pair(transfer, txn, record.business_date, settings) if settings else None
+    scored = score_pair(transfer, txn, match_date(transfer, record), settings) if settings else None
 
     _clear_suggestions(db, transfer)
     match = ReconciliationMatch(
@@ -449,7 +459,7 @@ def manual_match(
         match_type="MANUAL",
         confidence=scored.score if scored else 0,
         amount_delta=(txn.amount - transfer.amount).copy_abs(),
-        date_delta_days=(txn.txn_date - record.business_date).days,
+        date_delta_days=(txn.txn_date - match_date(transfer, record)).days,
         score_breakdown=(scored.breakdown if scored else
                          [{"signal": "manual", "points": 0,
                            "detail": "Matched by hand, outside the automatic rules"}]),

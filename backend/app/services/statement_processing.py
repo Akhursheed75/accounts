@@ -115,7 +115,8 @@ def process_statement(db: Session, statement_id: int, *, auto_match: bool = True
         statement.transaction_count = inserted
         statement.duplicate_count = duplicates
         statement.warnings = result.warnings or None
-        statement.statement_closing_balance = result.closing_balance
+        if result.closing_balance is not None:
+            statement.statement_closing_balance = result.closing_balance
         statement.period_start = statement.period_start or result.period_start
         statement.period_end = statement.period_end or result.period_end
         statement.processed_at = datetime.now(UTC)
@@ -140,6 +141,11 @@ def process_statement(db: Session, statement_id: int, *, auto_match: bool = True
         if auto_match and inserted:
             settings = match_settings(db)
             matched = _rematch_open_transfers(db, settings)
+            # Sheets that gave only a bank total can be solved now that the
+            # day's lines exist; re-check every day this statement covers.
+            from app.services import sheet_matching
+
+            sheet_matching.rematch_days(db, {t.txn_date for t in result.transactions}, settings)
             db.commit()
 
         return {

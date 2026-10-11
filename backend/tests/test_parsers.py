@@ -165,3 +165,53 @@ def test_each_bank_layout_is_recognised(filename, expected):
     with load(filename) as doc:
         parser = detect_parser(doc)
     assert parser is not None and parser.key == expected
+
+
+# ------------------------------------------- the daily set of 1 October 2026
+# Six statements as they now arrive each morning. Three are "Microsoft: Print To
+# PDF" with no text layer (both BAC and BANPRO dollars) and go through OCR.
+def _parse(name: str, parser, currency: str):
+    with load(name) as doc:
+        return parser.parse(doc, currency_code=currency)
+
+
+def test_oct01_bac_dollars_reads_every_row_including_the_3v_code():
+    result = _parse("2026-10-01-bac_usd.pdf", BacParser(), "USD")
+    assert result.extraction_method == "OCR"
+    assert len(result.transactions) == 8
+    assert result.warnings == []            # the running balance confirms every row
+    fee = [t for t in result.transactions if t.amount == Decimal("125.00")]
+    assert fee and fee[0].direction == "DEBIT"
+    credits = sorted(t.amount for t in result.transactions if t.direction == "CREDIT")
+    assert credits == [Decimal(x) for x in ("10.00", "10.00", "15.00", "185.00", "1510.00")]
+
+
+def test_oct01_bac_cordobas_holds_the_shops_deposits():
+    result = _parse("2026-10-01-bac_nio.pdf", BacParser(), "NIO")
+    amounts = {t.amount for t in result.transactions if t.direction == "CREDIT"}
+    # Jinotega's two deposits and Juigalpa's one, as written on their sheets.
+    assert {Decimal("18000.00"), Decimal("19030.00"), Decimal("17822.00")} <= amounts
+    assert result.warnings == []
+
+
+def test_oct01_banpro_dollars_is_a_scan_and_is_read_by_ocr():
+    with load("2026-10-01-banpro_usd.pdf") as doc:
+        assert not doc.has_text_layer
+        assert detect_parser(doc).key == "BANPRO"
+        result = BanproParser().parse(doc, currency_code="USD")
+    assert result.extraction_method == "OCR"
+    assert [t.amount for t in result.transactions] == [
+        Decimal("190.00"), Decimal("1095.00"), Decimal("235.00"), Decimal("280.00"),
+    ]
+    assert {t.reference for t in result.transactions} >= {"56780413", "56719022", "56715547"}
+
+
+def test_oct01_text_statements():
+    lafise_usd = _parse("2026-10-01-lafise_usd.pdf", LafiseParser(), "USD")
+    lafise_nio = _parse("2026-10-01-lafise_nio.pdf", LafiseParser(), "NIO")
+    banpro_nio = _parse("2026-10-01-banpro_nio.pdf", BanproParser(), "NIO")
+    assert len(lafise_usd.transactions) == 15
+    assert len(lafise_nio.transactions) == 12
+    assert len(banpro_nio.transactions) == 7
+    assert Decimal("4860.00") in {t.amount for t in lafise_nio.transactions}
+    assert Decimal("20000.00") in {t.amount for t in banpro_nio.transactions}

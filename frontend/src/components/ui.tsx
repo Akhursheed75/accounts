@@ -15,6 +15,8 @@ const STATUS_STYLES: Record<string, string> = {
   UNMATCHED: "bg-red-50 text-red-700 ring-red-600/20",
   IGNORED: "bg-ink-100 text-ink-600 ring-ink-500/20",
   PENDING_DEPOSIT: "bg-sky-50 text-sky-700 ring-sky-600/20",
+  DIFFERENT: "bg-red-50 text-red-700 ring-red-600/20",
+  WAITING: "bg-ink-100 text-ink-600 ring-ink-500/20",
   DEMO: "bg-violet-50 text-violet-700 ring-violet-600/20",
   ACTIVE: "bg-emerald-50 text-emerald-700 ring-emerald-600/20",
   INACTIVE: "bg-ink-100 text-ink-600 ring-ink-500/20",
@@ -38,6 +40,8 @@ const STATUS_DOTS: Record<string, string> = {
   UNMATCHED: "bg-red-500",
   IGNORED: "bg-ink-400",
   PENDING_DEPOSIT: "bg-sky-500",
+  DIFFERENT: "bg-red-500",
+  WAITING: "bg-ink-400",
 };
 
 export function StatusBadge({ status, dot = true }: { status: string; dot?: boolean }) {
@@ -180,6 +184,9 @@ export function Modal({
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-ink-950/40 p-0 sm:items-center sm:p-4">
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
         className={`flex max-h-[92vh] w-full flex-col overflow-hidden rounded-t-2xl bg-surface shadow-xl sm:rounded-2xl ${
           wide ? "sm:max-w-4xl" : "sm:max-w-lg"
         }`}

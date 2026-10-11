@@ -289,6 +289,9 @@ docker compose build --pull
 
 step "Starting"
 docker compose up -d
+# The proxy is not recreated when only its mounted config changes, so restart
+# it: that picks up nginx/reconcilia.conf and drops any stale addresses.
+docker compose restart proxy >/dev/null
 ok "Containers started"
 
 # --- 6. wait for the API ---------------------------------------------------
